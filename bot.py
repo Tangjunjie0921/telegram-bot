@@ -1,223 +1,206 @@
 import asyncio
 import json
-import os
 from datetime import datetime, timedelta
+from pathlib import Path
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 
-# ================== 配置 ==================
-TOKEN = "YOUR_BOT_TOKEN_HERE"  # 替换为你的 token
-DATA_FILE = "data.json"
+# ===== 配置 =====
+TOKEN = "你的BotToken"
+ADMIN_IDS = [123456789]  # 默认管理员列表，可在面板增加
+DATA_FILE = Path("data.json")
 
-# 初始管理员列表，可由管理员在面板中增减
-ADMINS = [123456789]  # 替换为你的 Telegram 用户 ID
-
-# 自动清理需求时间（小时）
-DEMAND_EXPIRY_HOURS = 12
-
-# ================== 数据管理 ==================
-if not os.path.exists(DATA_FILE):
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump({
-            "demands": [],
-            "user_blacklist": {},  # 用户A私有拉黑
-            "global_blacklist": [],  # 管理员全局拉黑
-            "keywords": [],
-            "groups": [],
-            "admins": ADMINS
-        }, f, ensure_ascii=False, indent=2)
-
-def load_data():
-    with open(DATA_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-def save_data(data):
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-# ================== Bot & Dispatcher ==================
+# ===== 初始化 =====
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# ================== 辅助函数 ==================
+# ===== 数据结构 =====
+data = {
+    "groups": [],            # 机器人工作的群组
+    "keywords": [],          # 管理员可配置关键词
+    "demands": [],           # 发布的需求
+    "user_blacklist": {},    # 用户A拉黑用户B: {userA: [userB,...]}
+    "global_blacklist": [],  # 管理员全局拉黑
+    "admins": ADMIN_IDS.copy()
+}
+
+# ===== 数据持久化 =====
+def save_data():
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+if DATA_FILE.exists():
+    with open(DATA_FILE, "r", encoding="utf-8") as f:
+        data.update(json.load(f))
+
+# ===== 辅助函数 =====
 def is_admin(user_id):
-    data = load_data()
     return user_id in data["admins"]
 
+def is_blacklisted(user_id, target_id):
+    return target_id in data["user_blacklist"].get(user_id, []) or target_id in data["global_blacklist"]
+
 def clean_expired_demands():
-    data = load_data()
     now = datetime.utcnow()
     new_demands = []
     for d in data["demands"]:
-        created = datetime.fromisoformat(d["timestamp"])
-        if now - created < timedelta(hours=DEMAND_EXPIRY_HOURS):
+        expire_time = datetime.fromisoformat(d["timestamp"]) + timedelta(hours=12)
+        if now <= expire_time:
             new_demands.append(d)
     data["demands"] = new_demands
-    save_data(data)
 
-def get_user_blacklist(user_id):
-    data = load_data()
-    return set(data["user_blacklist"].get(str(user_id), []))
-
-# ================== /demand 命令 ==================
+# ===== /demand 发布需求 =====
 @dp.message(Command(commands=["demand"]))
-async def cmd_demand(message: types.Message):
+async def handle_demand(msg: types.Message):
     clean_expired_demands()
-    data = load_data()
-    demand_text = message.text.replace("/demand", "").strip()
-    if not demand_text:
-        await message.reply("请输入需求内容。")
+    text = msg.text[7:].strip()
+    if not text:
+        await msg.reply("请提供需求内容")
         return
-
-    demand = {
+    data["demands"].append({
         "id": len(data["demands"]) + 1,
-        "user_id": message.from_user.id,
-        "text": demand_text,
-        "timestamp": datetime.utcnow().isoformat(),
-        "responses": []
-    }
-    data["demands"].append(demand)
-    save_data(data)
-    await message.reply(f"✅ 需求已发布: {demand_text}")
+        "user_id": msg.from_user.id,
+        "text": text,
+        "timestamp": datetime.utcnow().isoformat()
+    })
+    save_data()
+    await msg.reply(f"✅ 需求已发布: {text}")
 
-# ================== 关键词触发响应 ==================
+# ===== 关键词匹配 =====
 @dp.message()
-async def keyword_handler(message: types.Message):
+async def keyword_match(msg: types.Message):
+    if msg.from_user.is_bot:
+        return
     clean_expired_demands()
-    data = load_data()
-    text_lower = message.text.lower()
+    text_lower = msg.text.lower()
+    for keyword in data["keywords"]:
+        if keyword.lower() in text_lower:
+            await msg.reply(f"⚡ 触发关键词: {keyword}")
+            break
 
-    # 检查是否在管理的群组
-    if message.chat.type != "private" and message.chat.id not in data["groups"]:
+# ===== 响应需求 =====
+@dp.message()
+async def respond_demand(msg: types.Message):
+    if msg.from_user.is_bot:
         return
+    clean_expired_demands()
+    for d in data["demands"]:
+        if msg.from_user.id == d["user_id"]:
+            continue
+        if is_blacklisted(d["user_id"], msg.from_user.id):
+            await msg.reply("你已被拉黑，无法响应此用户的需求")
+            continue
+        if d["text"].lower() in msg.text.lower():
+            await msg.reply(f"✅ 响应用户 {d['user_id']} 的需求: {d['text']}")
 
-    # 检查全局黑名单
-    if message.from_user.id in data["global_blacklist"]:
+# ===== 管理面板 =====
+@dp.message(Command(commands=["panel"]))
+async def admin_panel(msg: types.Message):
+    if not is_admin(msg.from_user.id):
+        await msg.reply("你不是管理员")
         return
+    text = (
+        f"🛠 管理面板\n"
+        f"群组: {data['groups']}\n"
+        f"关键词: {data['keywords']}\n"
+        f"全局黑名单: {data['global_blacklist']}\n"
+        f"管理员: {data['admins']}\n"
+        f"发送 /addgroup 群ID 或 /rmgroup 群ID 来管理群组\n"
+        f"发送 /addkeyword 关键词 或 /rmkeyword 关键词 来管理关键词\n"
+        f"发送 /blacklist 用户ID 或 /rmblacklist 用户ID 来管理全局黑名单\n"
+        f"发送 /addadmin 用户ID 或 /rmadmin 用户ID 来管理管理员"
+    )
+    await msg.reply(text)
 
-    # 检查关键词
-    for kw in data["keywords"]:
-        if kw.lower() in text_lower:
-            await message.reply(f"关键词触发: {kw}")
-            return
+# ===== 各种管理命令 =====
+@dp.message(Command(commands=["addgroup"]))
+async def add_group(msg: types.Message):
+    if not is_admin(msg.from_user.id): return
+    gid = int(msg.text.split()[1])
+    if gid not in data["groups"]:
+        data["groups"].append(gid)
+        save_data()
+        await msg.reply(f"✅ 添加群组 {gid}")
 
-# ================== 管理面板指令 ==================
-@dp.message(Command(commands=["add_admin"]))
-async def add_admin(message: types.Message):
-    if not is_admin(message.from_user.id):
-        await message.reply("❌ 你不是管理员")
-        return
-    try:
-        new_admin_id = int(message.text.split()[1])
-        data = load_data()
-        if new_admin_id not in data["admins"]:
-            data["admins"].append(new_admin_id)
-            save_data(data)
-        await message.reply(f"✅ 已增加管理员: {new_admin_id}")
-    except Exception:
-        await message.reply("格式错误: /add_admin <用户ID>")
+@dp.message(Command(commands=["rmgroup"]))
+async def rm_group(msg: types.Message):
+    if not is_admin(msg.from_user.id): return
+    gid = int(msg.text.split()[1])
+    if gid in data["groups"]:
+        data["groups"].remove(gid)
+        save_data()
+        await msg.reply(f"✅ 移除群组 {gid}")
 
-@dp.message(Command(commands=["remove_admin"]))
-async def remove_admin(message: types.Message):
-    if not is_admin(message.from_user.id):
-        await message.reply("❌ 你不是管理员")
-        return
-    try:
-        rem_id = int(message.text.split()[1])
-        data = load_data()
-        if rem_id in data["admins"]:
-            data["admins"].remove(rem_id)
-            save_data(data)
-        await message.reply(f"✅ 已移除管理员: {rem_id}")
-    except Exception:
-        await message.reply("格式错误: /remove_admin <用户ID>")
+@dp.message(Command(commands=["addkeyword"]))
+async def add_keyword(msg: types.Message):
+    if not is_admin(msg.from_user.id): return
+    kw = msg.text.split()[1]
+    if kw not in data["keywords"]:
+        data["keywords"].append(kw)
+        save_data()
+        await msg.reply(f"✅ 添加关键词 {kw}")
 
-# ================== 黑名单 ==================
+@dp.message(Command(commands=["rmkeyword"]))
+async def rm_keyword(msg: types.Message):
+    if not is_admin(msg.from_user.id): return
+    kw = msg.text.split()[1]
+    if kw in data["keywords"]:
+        data["keywords"].remove(kw)
+        save_data()
+        await msg.reply(f"✅ 移除关键词 {kw}")
+
 @dp.message(Command(commands=["blacklist"]))
-async def blacklist_user(message: types.Message):
-    try:
-        target_id = int(message.text.split()[1])
-        data = load_data()
-        if is_admin(message.from_user.id):
-            # 管理员全局黑名单
-            if target_id not in data["global_blacklist"]:
-                data["global_blacklist"].append(target_id)
-        else:
-            # 用户A拉黑
-            uid = str(message.from_user.id)
-            if uid not in data["user_blacklist"]:
-                data["user_blacklist"][uid] = []
-            if target_id not in data["user_blacklist"][uid]:
-                data["user_blacklist"][uid].append(target_id)
-        save_data(data)
-        await message.reply(f"✅ 用户 {target_id} 已拉黑")
-    except Exception:
-        await message.reply("格式错误: /blacklist <用户ID>")
+async def add_blacklist(msg: types.Message):
+    if not is_admin(msg.from_user.id): return
+    uid = int(msg.text.split()[1])
+    if uid not in data["global_blacklist"]:
+        data["global_blacklist"].append(uid)
+        save_data()
+        await msg.reply(f"✅ 用户 {uid} 加入全局黑名单")
 
-# ================== 群组管理 ==================
-@dp.message(Command(commands=["add_group"]))
-async def add_group(message: types.Message):
-    if not is_admin(message.from_user.id):
-        await message.reply("❌ 你不是管理员")
+@dp.message(Command(commands=["rmblacklist"]))
+async def rm_blacklist(msg: types.Message):
+    if not is_admin(msg.from_user.id): return
+    uid = int(msg.text.split()[1])
+    if uid in data["global_blacklist"]:
+        data["global_blacklist"].remove(uid)
+        save_data()
+        await msg.reply(f"✅ 用户 {uid} 移除全局黑名单")
+
+@dp.message(Command(commands=["addadmin"]))
+async def add_admin(msg: types.Message):
+    if not is_admin(msg.from_user.id): return
+    uid = int(msg.text.split()[1])
+    if uid not in data["admins"]:
+        data["admins"].append(uid)
+        save_data()
+        await msg.reply(f"✅ 用户 {uid} 已成为管理员")
+
+@dp.message(Command(commands=["rmadmin"]))
+async def rm_admin(msg: types.Message):
+    if not is_admin(msg.from_user.id): return
+    uid = int(msg.text.split()[1])
+    if uid in data["admins"]:
+        data["admins"].remove(uid)
+        save_data()
+        await msg.reply(f"✅ 用户 {uid} 已取消管理员")
+
+# ===== 用户A拉黑用户B =====
+@dp.message(Command(commands=["ublack"]))
+async def user_black(msg: types.Message):
+    parts = msg.text.split()
+    if len(parts) != 2:
+        await msg.reply("格式: /ublack 用户ID")
         return
-    try:
-        gid = int(message.text.split()[1])
-        data = load_data()
-        if gid not in data["groups"]:
-            data["groups"].append(gid)
-            save_data(data)
-        await message.reply(f"✅ 已增加群组: {gid}")
-    except Exception:
-        await message.reply("格式错误: /add_group <群组ID>")
+    target = int(parts[1])
+    data["user_blacklist"].setdefault(msg.from_user.id, [])
+    if target not in data["user_blacklist"][msg.from_user.id]:
+        data["user_blacklist"][msg.from_user.id].append(target)
+        save_data()
+        await msg.reply(f"✅ 用户 {target} 被你拉黑")
 
-@dp.message(Command(commands=["remove_group"]))
-async def remove_group(message: types.Message):
-    if not is_admin(message.from_user.id):
-        await message.reply("❌ 你不是管理员")
-        return
-    try:
-        gid = int(message.text.split()[1])
-        data = load_data()
-        if gid in data["groups"]:
-            data["groups"].remove(gid)
-            save_data(data)
-        await message.reply(f"✅ 已移除群组: {gid}")
-    except Exception:
-        await message.reply("格式错误: /remove_group <群组ID>")
-
-# ================== 关键词管理 ==================
-@dp.message(Command(commands=["add_keyword"]))
-async def add_keyword(message: types.Message):
-    if not is_admin(message.from_user.id):
-        await message.reply("❌ 你不是管理员")
-        return
-    try:
-        kw = message.text.split()[1]
-        data = load_data()
-        if kw.lower() not in [k.lower() for k in data["keywords"]]:
-            data["keywords"].append(kw)
-            save_data(data)
-        await message.reply(f"✅ 已增加关键词: {kw}")
-    except Exception:
-        await message.reply("格式错误: /add_keyword <关键词>")
-
-@dp.message(Command(commands=["remove_keyword"]))
-async def remove_keyword(message: types.Message):
-    if not is_admin(message.from_user.id):
-        await message.reply("❌ 你不是管理员")
-        return
-    try:
-        kw = message.text.split()[1]
-        data = load_data()
-        data["keywords"] = [k for k in data["keywords"] if k.lower() != kw.lower()]
-        save_data(data)
-        await message.reply(f"✅ 已移除关键词: {kw}")
-    except Exception:
-        await message.reply("格式错误: /remove_keyword <关键词>")
-
-# ================== 启动 ==================
+# ===== 启动 =====
 async def main():
-    clean_expired_demands()
     await dp.start_polling(bot)
 
 if __name__ == "__main__":

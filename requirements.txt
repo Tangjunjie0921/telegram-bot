@@ -1,15 +1,8 @@
-# Telegram Bot 依赖环境，兼容 Railway 免费 Python 3.13
-aiogram==3.4.1
-aiofiles==23.2.1
-aiohttp==3.9.5
-magic-filter==1.0.12
-pydantic==2.5.3
-pydantic-core==2.10.1
-typing-extensions==4.6.0
-yarl==1.23.0
-attrs==25.4.0
-frozenlist==1.8.0
-multidict==6.7.1
-aiosignal==1.4.0
-certifi>=2023.7.22
-annotated-types>=0.7.0
+# Telegram Bot 依赖环境
+aiogram==3.3.0             # 与 pydantic-core 2.10.x 兼容
+pydantic==2.4.2            # 对应 pydantic-core 2.10.1
+pydantic-core==2.10.1      # 核心组件
+aiohttp==3.8.5             # 与 aiogram 3.3.0 兼容
+aiofiles==23.1.0           # 文件异步操作
+magic-filter==1.0.12       # aiogram 辅助过滤器
+typing-extensions==4.6.3   # 与 pydantic-core 兼容
