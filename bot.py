@@ -1,13 +1,12 @@
 import asyncio
 import json
+import os
 from datetime import datetime, timedelta
 from pathlib import Path
 from aiogram import Bot, Dispatcher, types
-from aiogram.filters.command import Command  # 修复导入
+from aiogram.filters import Command
 
-# ===== 配置 =====
-import os
-TOKEN = os.getenv("BOT_TOKEN", "").strip()  # 从环境变量获取 token
+TOKEN = os.environ["BOT_TOKEN"]
 ADMIN_IDS = [123456789]  # 默认管理员列表，可在面板增加
 DATA_FILE = Path("data.json")
 
