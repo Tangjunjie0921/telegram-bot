@@ -7,7 +7,7 @@ from aiogram.filters import Command
 
 # ===== 配置 =====
 TOKEN = "你的BotToken"
-ADMIN_IDS = [123456789]
+ADMIN_IDS = [123456789]  # 默认管理员列表，可在面板增加
 DATA_FILE = Path("data.json")
 
 # ===== 初始化 =====
@@ -16,11 +16,11 @@ dp = Dispatcher()
 
 # ===== 数据结构 =====
 data = {
-    "groups": [],
-    "keywords": [],
-    "demands": [],
-    "user_blacklist": {},
-    "global_blacklist": [],
+    "groups": [],            # 机器人工作的群组
+    "keywords": [],          # 管理员可配置关键词
+    "demands": [],           # 发布的需求
+    "user_blacklist": {},    # 用户A拉黑用户B: {userA: [userB,...]}
+    "global_blacklist": [],  # 管理员全局拉黑
     "admins": ADMIN_IDS.copy()
 }
 
@@ -42,12 +42,10 @@ def is_blacklisted(user_id, target_id):
 
 def clean_expired_demands():
     now = datetime.utcnow()
-    new_demands = []
-    for d in data["demands"]:
-        expire_time = datetime.fromisoformat(d["timestamp"]) + timedelta(hours=12)
-        if now <= expire_time:
-            new_demands.append(d)
-    data["demands"] = new_demands
+    data["demands"] = [
+        d for d in data["demands"]
+        if now <= datetime.fromisoformat(d["timestamp"]) + timedelta(hours=12)
+    ]
 
 # ===== /demand 发布需求 =====
 @dp.message(Command(commands=["demand"]))
@@ -69,7 +67,8 @@ async def handle_demand(msg: types.Message):
 # ===== 关键词匹配 =====
 @dp.message()
 async def keyword_match(msg: types.Message):
-    if msg.from_user.is_bot: return
+    if msg.from_user.is_bot or not msg.text:
+        return
     clean_expired_demands()
     text_lower = msg.text.lower()
     for keyword in data["keywords"]:
@@ -80,10 +79,12 @@ async def keyword_match(msg: types.Message):
 # ===== 响应需求 =====
 @dp.message()
 async def respond_demand(msg: types.Message):
-    if msg.from_user.is_bot: return
+    if msg.from_user.is_bot or not msg.text:
+        return
     clean_expired_demands()
     for d in data["demands"]:
-        if msg.from_user.id == d["user_id"]: continue
+        if msg.from_user.id == d["user_id"]:
+            continue
         if is_blacklisted(d["user_id"], msg.from_user.id):
             await msg.reply("你已被拉黑，无法响应此用户的需求")
             continue
@@ -110,11 +111,18 @@ async def admin_panel(msg: types.Message):
     await msg.reply(text)
 
 # ===== 各种管理命令 =====
+async def safe_int_split(msg_text, default=None):
+    parts = msg_text.split()
+    try:
+        return int(parts[1])
+    except (IndexError, ValueError):
+        return default
+
 @dp.message(Command(commands=["addgroup"]))
 async def add_group(msg: types.Message):
     if not is_admin(msg.from_user.id): return
-    gid = int(msg.text.split()[1])
-    if gid not in data["groups"]:
+    gid = await safe_int_split(msg.text)
+    if gid and gid not in data["groups"]:
         data["groups"].append(gid)
         save_data()
         await msg.reply(f"✅ 添加群组 {gid}")
@@ -122,8 +130,8 @@ async def add_group(msg: types.Message):
 @dp.message(Command(commands=["rmgroup"]))
 async def rm_group(msg: types.Message):
     if not is_admin(msg.from_user.id): return
-    gid = int(msg.text.split()[1])
-    if gid in data["groups"]:
+    gid = await safe_int_split(msg.text)
+    if gid and gid in data["groups"]:
         data["groups"].remove(gid)
         save_data()
         await msg.reply(f"✅ 移除群组 {gid}")
@@ -131,7 +139,10 @@ async def rm_group(msg: types.Message):
 @dp.message(Command(commands=["addkeyword"]))
 async def add_keyword(msg: types.Message):
     if not is_admin(msg.from_user.id): return
-    kw = msg.text.split()[1]
+    try:
+        kw = msg.text.split()[1]
+    except IndexError:
+        return
     if kw not in data["keywords"]:
         data["keywords"].append(kw)
         save_data()
@@ -140,7 +151,10 @@ async def add_keyword(msg: types.Message):
 @dp.message(Command(commands=["rmkeyword"]))
 async def rm_keyword(msg: types.Message):
     if not is_admin(msg.from_user.id): return
-    kw = msg.text.split()[1]
+    try:
+        kw = msg.text.split()[1]
+    except IndexError:
+        return
     if kw in data["keywords"]:
         data["keywords"].remove(kw)
         save_data()
@@ -149,8 +163,8 @@ async def rm_keyword(msg: types.Message):
 @dp.message(Command(commands=["blacklist"]))
 async def add_blacklist(msg: types.Message):
     if not is_admin(msg.from_user.id): return
-    uid = int(msg.text.split()[1])
-    if uid not in data["global_blacklist"]:
+    uid = await safe_int_split(msg.text)
+    if uid and uid not in data["global_blacklist"]:
         data["global_blacklist"].append(uid)
         save_data()
         await msg.reply(f"✅ 用户 {uid} 加入全局黑名单")
@@ -158,8 +172,8 @@ async def add_blacklist(msg: types.Message):
 @dp.message(Command(commands=["rmblacklist"]))
 async def rm_blacklist(msg: types.Message):
     if not is_admin(msg.from_user.id): return
-    uid = int(msg.text.split()[1])
-    if uid in data["global_blacklist"]:
+    uid = await safe_int_split(msg.text)
+    if uid and uid in data["global_blacklist"]:
         data["global_blacklist"].remove(uid)
         save_data()
         await msg.reply(f"✅ 用户 {uid} 移除全局黑名单")
@@ -167,8 +181,8 @@ async def rm_blacklist(msg: types.Message):
 @dp.message(Command(commands=["addadmin"]))
 async def add_admin(msg: types.Message):
     if not is_admin(msg.from_user.id): return
-    uid = int(msg.text.split()[1])
-    if uid not in data["admins"]:
+    uid = await safe_int_split(msg.text)
+    if uid and uid not in data["admins"]:
         data["admins"].append(uid)
         save_data()
         await msg.reply(f"✅ 用户 {uid} 已成为管理员")
@@ -176,8 +190,8 @@ async def add_admin(msg: types.Message):
 @dp.message(Command(commands=["rmadmin"]))
 async def rm_admin(msg: types.Message):
     if not is_admin(msg.from_user.id): return
-    uid = int(msg.text.split()[1])
-    if uid in data["admins"]:
+    uid = await safe_int_split(msg.text)
+    if uid and uid in data["admins"]:
         data["admins"].remove(uid)
         save_data()
         await msg.reply(f"✅ 用户 {uid} 已取消管理员")
@@ -189,7 +203,10 @@ async def user_black(msg: types.Message):
     if len(parts) != 2:
         await msg.reply("格式: /ublack 用户ID")
         return
-    target = int(parts[1])
+    try:
+        target = int(parts[1])
+    except ValueError:
+        return
     data["user_blacklist"].setdefault(msg.from_user.id, [])
     if target not in data["user_blacklist"][msg.from_user.id]:
         data["user_blacklist"][msg.from_user.id].append(target)
