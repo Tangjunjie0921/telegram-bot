@@ -7,7 +7,7 @@ from aiogram.filters import Command
 
 # ===== 配置 =====
 TOKEN = "你的BotToken"
-ADMIN_IDS = [123456789]  # 默认管理员列表，可在面板增加
+ADMIN_IDS = [123456789]
 DATA_FILE = Path("data.json")
 
 # ===== 初始化 =====
@@ -16,11 +16,11 @@ dp = Dispatcher()
 
 # ===== 数据结构 =====
 data = {
-    "groups": [],            # 机器人工作的群组
-    "keywords": [],          # 管理员可配置关键词
-    "demands": [],           # 发布的需求
-    "user_blacklist": {},    # 用户A拉黑用户B: {userA: [userB,...]}
-    "global_blacklist": [],  # 管理员全局拉黑
+    "groups": [],
+    "keywords": [],
+    "demands": [],
+    "user_blacklist": {},
+    "global_blacklist": [],
     "admins": ADMIN_IDS.copy()
 }
 
@@ -69,8 +69,7 @@ async def handle_demand(msg: types.Message):
 # ===== 关键词匹配 =====
 @dp.message()
 async def keyword_match(msg: types.Message):
-    if msg.from_user.is_bot:
-        return
+    if msg.from_user.is_bot: return
     clean_expired_demands()
     text_lower = msg.text.lower()
     for keyword in data["keywords"]:
@@ -81,12 +80,10 @@ async def keyword_match(msg: types.Message):
 # ===== 响应需求 =====
 @dp.message()
 async def respond_demand(msg: types.Message):
-    if msg.from_user.is_bot:
-        return
+    if msg.from_user.is_bot: return
     clean_expired_demands()
     for d in data["demands"]:
-        if msg.from_user.id == d["user_id"]:
-            continue
+        if msg.from_user.id == d["user_id"]: continue
         if is_blacklisted(d["user_id"], msg.from_user.id):
             await msg.reply("你已被拉黑，无法响应此用户的需求")
             continue

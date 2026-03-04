@@ -1,7 +1,6 @@
-# requirements.txt
 aiogram==3.3.0
 pydantic==2.4.2
-pydantic-core==2.10.1
+pydantic-core
 aiohttp
 aiofiles
 magic-filter==1.0.12
