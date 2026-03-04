@@ -1,14 +1,15 @@
-# Telegram 碰撞需求机器人依赖
+# Telegram Bot 依赖环境，兼容 Railway 免费 Python 3.13
 aiogram==3.4.1
-aiohttp==3.9.0
 aiofiles==23.2.1
+aiohttp==3.9.5
 magic-filter==1.0.12
-pydantic==2.4.2          # 固定版本，避免 pydantic-core 构建失败
-typing-extensions==4.7.0
-annotated-types==0.7.0
+pydantic==2.5.3
+pydantic-core==2.10.1
+typing-extensions==4.6.0
 yarl==1.23.0
-multidict==6.7.1
 attrs==25.4.0
 frozenlist==1.8.0
+multidict==6.7.1
 aiosignal==1.4.0
 certifi>=2023.7.22
+annotated-types>=0.7.0
