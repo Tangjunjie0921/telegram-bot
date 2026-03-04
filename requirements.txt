@@ -1,7 +1,14 @@
+# Telegram 碰撞需求机器人依赖
 aiogram==3.4.1
 aiohttp==3.9.0
 aiofiles==23.2.1
-pydantic>=2.4.1,<2.6
-typing-extensions>=4.7.0,<5.0
-magic-filter>=1.0.12,<1.1
-annotated-types>=0.4.0
+magic-filter==1.0.12
+pydantic==2.4.2          # 固定版本，避免 pydantic-core 构建失败
+typing-extensions==4.7.0
+annotated-types==0.7.0
+yarl==1.23.0
+multidict==6.7.1
+attrs==25.4.0
+frozenlist==1.8.0
+aiosignal==1.4.0
+certifi>=2023.7.22
