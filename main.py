@@ -2,6 +2,8 @@ import asyncio
 import json
 import os
 from aiogram import Bot, Dispatcher, F, Router
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 
@@ -13,12 +15,16 @@ ADMIN_ID = int(os.getenv("ADMIN_ID"))
 if not all([TOKEN, GROUP_ID, ADMIN_ID]):
     raise ValueError("❌ 请在 Railway 设置环境变量: BOT_TOKEN, GROUP_ID, ADMIN_ID")
 
-bot = Bot(token=TOKEN, parse_mode="HTML")
+# ✅ 已修复：使用官方推荐的 DefaultBotProperties（aiogram 3.7+ 强制要求）
+bot = Bot(
+    token=TOKEN,
+    default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+)
 dp = Dispatcher()
 router = Router()
 dp.include_router(router)
 
-DATA_FILE = "data/reports.json"
+DATA_FILE = "/data/reports.json"   # Railway Volume 推荐路径（免费计划重启会丢失）
 reports = {}  # original_msg_id -> {"warning_id": int, "suspect_id": int, "chat_id": int, "reporters": set}
 lock = asyncio.Lock()
 
@@ -26,7 +32,7 @@ lock = asyncio.Lock()
 async def load_data():
     global reports
     try:
-        os.makedirs("data", exist_ok=True)
+        os.makedirs(os.path.dirname(DATA_FILE), exist_ok=True)
         if os.path.exists(DATA_FILE):
             with open(DATA_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
@@ -36,11 +42,11 @@ async def load_data():
             print(f"✅ 已加载 {len(reports)} 条举报记录")
     except Exception as e:
         print("数据加载失败（首次运行正常）:", e)
-        reports = {}
 
 async def save_data():
     async with lock:
         try:
+            os.makedirs(os.path.dirname(DATA_FILE), exist_ok=True)
             data_to_save = {str(k): {**v, "reporters": list(v["reporters"])} for k, v in reports.items()}
             with open(DATA_FILE, "w", encoding="utf-8") as f:
                 json.dump(data_to_save, f, ensure_ascii=False, indent=2)
@@ -57,7 +63,6 @@ async def check_user_bio(message: Message):
     try:
         chat_info = await bot.get_chat(user.id)
         bio = (chat_info.bio or "").lower()
-        # 严格按需求：http://、https://、t.me/、@
         if any(x in bio for x in ["http://", "https://", "t.me/", "@"]):
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="举报该用户", callback_data=f"report:{message.message_id}")]
@@ -121,7 +126,6 @@ async def handle_report(callback: CallbackQuery):
 
 # ==================== 功能 C：原消息删除 → 同步删除提示 ====================
 async def cleanup_deleted_messages():
-    """每 5 分钟检测一次（Bot API 规范下最佳方案）"""
     while True:
         await asyncio.sleep(300)
         to_remove = []
@@ -129,22 +133,19 @@ async def cleanup_deleted_messages():
             check_list = list(reports.items())
         for orig_id, data in check_list:
             try:
-                # 用 forward 测试消息是否存在
                 test = await bot.forward_message(
-                    chat_id=ADMIN_ID,
-                    from_chat_id=data["chat_id"],
-                    message_id=orig_id
+                    chat_id=ADMIN_ID, from_chat_id=data["chat_id"], message_id=orig_id
                 )
-                await bot.delete_message(ADMIN_ID, test.message_id)  # 清理测试消息
+                await bot.delete_message(ADMIN_ID, test.message_id)
             except TelegramBadRequest as e:
-                if "not found" in str(e).lower() or "message to forward" in str(e).lower():
+                if "not found" in str(e).lower():
                     try:
                         await bot.delete_message(data["chat_id"], data["warning_id"])
                         to_remove.append(orig_id)
                         print(f"✅ 原消息 {orig_id} 已删除，已同步删除警告")
                     except:
                         pass
-            except:
+            except Exception:
                 pass
         if to_remove:
             async with lock:
@@ -154,7 +155,7 @@ async def cleanup_deleted_messages():
 
 # ==================== 启动 ====================
 async def main():
-    print("🚀 防广告机器人启动中...（Railway 环境）")
+    print("🚀 防广告机器人启动成功（aiogram 3.14+ + Railway 规范）")
     await load_data()
     asyncio.create_task(cleanup_deleted_messages())
     await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
