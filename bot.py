@@ -1,7 +1,6 @@
 import os
 import re
-import asyncio
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
     MessageHandler,
@@ -20,7 +19,7 @@ reports = {}
 # 原消息ID -> 机器人消息ID
 message_map = {}
 
-# 正则检测链接
+# 检测广告链接
 link_pattern = re.compile(r"(https?://|t\.me/|@)")
 
 # -----------------------------
@@ -37,6 +36,7 @@ async def check_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user = msg.from_user
 
+    # 不检测机器人
     if user.is_bot:
         return
 
@@ -53,9 +53,9 @@ async def check_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not link_pattern.search(bio):
         return
 
-    keyboard = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("举报该用户", callback_data=f"report_{user.id}_{msg.message_id}")]]
-    )
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("举报该用户", callback_data=f"report_{user.id}_{msg.message_id}")]
+    ])
 
     bot_msg = await msg.reply_text(
         f"⚠️ 简介有链接，疑似广告引流\n用户ID: {user.id}\n举报数: 0",
@@ -88,6 +88,7 @@ async def handle_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     reporter = query.from_user.id
 
+    # 防重复举报
     if reporter in reports[key]:
         return
 
@@ -95,9 +96,9 @@ async def handle_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     count = len(reports[key])
 
-    keyboard = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("举报该用户", callback_data=f"report_{user_id}_{origin_msg}")]]
-    )
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("举报该用户", callback_data=f"report_{user_id}_{origin_msg}")]
+    ])
 
     if count >= 3:
 
@@ -122,58 +123,43 @@ async def handle_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # -----------------------------
 # 定时检测消息是否被删除
 # -----------------------------
-async def cleanup_loop(context: ContextTypes.DEFAULT_TYPE):
+async def cleanup(context: ContextTypes.DEFAULT_TYPE):
 
     bot = context.bot
+    remove_list = []
 
-    while True:
+    for origin_msg, bot_msg in message_map.items():
 
-        await asyncio.sleep(20)
+        try:
 
-        remove_list = []
+            await bot.forward_message(
+                chat_id=GROUP_ID,
+                from_chat_id=GROUP_ID,
+                message_id=origin_msg
+            )
 
-        for origin_msg, bot_msg in message_map.items():
+        except:
 
             try:
-
-                await bot.forward_message(
+                await bot.delete_message(
                     chat_id=GROUP_ID,
-                    from_chat_id=GROUP_ID,
-                    message_id=origin_msg
+                    message_id=bot_msg
                 )
-
             except:
+                pass
 
-                try:
-                    await bot.delete_message(
-                        chat_id=GROUP_ID,
-                        message_id=bot_msg
-                    )
-                except:
-                    pass
+            remove_list.append(origin_msg)
 
-                remove_list.append(origin_msg)
-
-        for m in remove_list:
-            message_map.pop(m, None)
+    for m in remove_list:
+        message_map.pop(m, None)
 
 
 # -----------------------------
 # 启动
 # -----------------------------
-async def post_init(app):
-
-    app.create_task(cleanup_loop(app.bot))
-
-
 def main():
 
-    app = (
-        ApplicationBuilder()
-        .token(BOT_TOKEN)
-        .post_init(post_init)
-        .build()
-    )
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(
         MessageHandler(filters.TEXT & (~filters.COMMAND), check_message)
@@ -182,6 +168,9 @@ def main():
     app.add_handler(
         CallbackQueryHandler(handle_report)
     )
+
+    # 20秒检测一次删除消息
+    app.job_queue.run_repeating(cleanup, interval=20, first=20)
 
     print("Bot running...")
 
