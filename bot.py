@@ -4,199 +4,348 @@ import time
 import re
 from collections import defaultdict, deque
 
-from telegram import Update
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
     ApplicationBuilder,
-    MessageHandler,
     CommandHandler,
+    MessageHandler,
     ContextTypes,
+    CallbackQueryHandler,
+    ConversationHandler,
     filters
 )
 
-# ===== 配置 =====
-TOKEN = os.getenv("BOT_TOKEN")
+TOKEN = os.environ.get("BOT_TOKEN")
+
 ADMIN_ID = 8276405169
 
-if not TOKEN:
-    raise ValueError("请设置环境变量 BOT_TOKEN")
+DATA_FILE = "data.json"
 
-# ===== 文件 =====
-KEYWORDS_FILE = "keywords.json"
-GROUPS_FILE = "groups.json"
+# =========================
+# 可调整参数
+# =========================
 
-# ===== 参数 =====
-SCORE_THRESHOLD = 3
+PARAMS = {
+    "score_threshold": 3,
+    "single_char_limit": 3,
+    "username_score": 2,
+    "link_score": 1,
+    "cooldown": 60,
+    "bio_alert": True
+}
 
-# ===== 数据结构 =====
-user_scores = {}
-user_history = defaultdict(lambda: deque(maxlen=5))
-user_cache = {}
-bio_warn_cooldown = {}
+# =========================
+# 数据结构
+# =========================
 
-# ===== 正则 =====
-link_regex = re.compile(r"(http|t\.me|\.com|\.xyz|\.top|\.cc|\.net)")
+groups = set()
+keywords = set()
 
-USERNAME_BAD_WORDS = [
-    "资源","看片","卖片","成人视频","幼女","福利","点我头像","私聊我"
-]
+user_scores = defaultdict(int)
+user_last_messages = defaultdict(lambda: deque(maxlen=5))
+user_join_time = {}
 
-# ===== 工具函数 =====
-def load_json(file):
-    if not os.path.exists(file):
-        return []
-    with open(file,"r",encoding="utf-8") as f:
-        return json.load(f)
+bio_cache = {}
+bio_cache_time = {}
 
-def save_json(file,data):
-    with open(file,"w",encoding="utf-8") as f:
-        json.dump(data,f,ensure_ascii=False,indent=2)
+# =========================
+# 数据持久化
+# =========================
 
-def is_admin(update):
-    return update.effective_user.id == ADMIN_ID
+def load_data():
+    global groups, keywords, PARAMS
+    if os.path.exists(DATA_FILE):
+        with open(DATA_FILE,"r") as f:
+            data=json.load(f)
+            groups=set(data.get("groups",[]))
+            keywords=set(data.get("keywords",[]))
+            PARAMS.update(data.get("params",{}))
 
-def check_username(user):
-    full = (user.username or "") + (user.full_name or "")
-    return any(w in full for w in USERNAME_BAD_WORDS)
+def save_data():
+    with open(DATA_FILE,"w") as f:
+        json.dump({
+            "groups":list(groups),
+            "keywords":list(keywords),
+            "params":PARAMS
+        },f)
 
-# ===== 加载数据 =====
-keywords = load_json(KEYWORDS_FILE)
-allowed_groups = load_json(GROUPS_FILE)
+# =========================
+# 工具函数
+# =========================
 
-# ===== 分数管理 =====
-def update_score(uid, points):
-    now = time.time()
-    if uid not in user_scores:
-        user_scores[uid] = {"score":0, "time":now}
-    if now - user_scores[uid]["time"] > 300:
-        user_scores[uid]["score"] = 0
-    user_scores[uid]["score"] += points
-    user_scores[uid]["time"] = now
-    return user_scores[uid]["score"]
+def contains_link(text):
 
-def get_score(uid):
-    return user_scores.get(uid, {}).get("score", 0)
+    link_pattern=r"(https?://|t\.me/|telegram\.me)"
+    return re.search(link_pattern,text,re.IGNORECASE)
 
-# ===== 用户资料缓存 =====
-async def get_user_bio(bot, chat_id, user_id):
-    key = (chat_id, user_id)
-    now = time.time()
-    if key in user_cache:
-        if now - user_cache[key]["time"] < 600:
-            return user_cache[key]["bio"]
-    member = await bot.get_chat_member(chat_id, user_id)
-    bio = getattr(member.user, "bio", "")
-    user_cache[key] = {"bio": bio, "time": now}
-    return bio
+def is_single_char(text):
 
-# ===== 封禁用户 =====
-async def mute_user(update):
-    try:
-        await update.effective_chat.restrict_member(
-            update.effective_user.id,
-            permissions={}
-        )
-    except:
-        pass
+    text=text.strip()
 
-# ===== 管理员命令 =====
-async def add_group(update:Update, context:ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update): return
-    gid = int(context.args[0])
-    if gid not in allowed_groups:
-        allowed_groups.append(gid)
-        save_json(GROUPS_FILE, allowed_groups)
-    await update.message.reply_text("群组已添加")
+    if len(text)==1:
+        return True
 
-async def remove_group(update, context):
-    if not is_admin(update): return
-    gid = int(context.args[0])
-    if gid in allowed_groups:
-        allowed_groups.remove(gid)
-        save_json(GROUPS_FILE, allowed_groups)
-    await update.message.reply_text("群组已移除")
+    if re.fullmatch(r"[a-zA-Z0-9]",text):
+        return True
 
-async def add_keyword(update, context):
-    if not is_admin(update): return
-    text = update.message.text.replace("/addkw","").strip()
-    for l in text.split("\n"):
-        if l.strip() and l not in keywords:
-            keywords.append(l.strip())
-    save_json(KEYWORDS_FILE, keywords)
-    await update.message.reply_text("关键词已增加")
+    return False
 
-async def export_data(update, context):
-    if not is_admin(update): return
-    data = {"keywords": keywords, "groups": allowed_groups}
-    await update.message.reply_text(json.dumps(data, ensure_ascii=False, indent=2))
+# =========================
+# 管理员命令
+# =========================
 
-# ===== 消息处理 =====
-async def handle_message(update:Update, context:ContextTypes.DEFAULT_TYPE):
-    chat = update.effective_chat
-    user = update.effective_user
-    text = update.message.text or ""
-    uid = user.id
+async def add_group(update:Update,context:ContextTypes.DEFAULT_TYPE):
 
-    if chat.id not in allowed_groups:
+    if update.effective_user.id!=ADMIN_ID:
         return
 
-    user_history[uid].append(text)
+    gid=int(context.args[0])
 
-    # 单字连续三次禁言
-    if len(text) == 1:
-        last = list(user_history[uid])[-3:]
-        if len(last) == 3 and all(len(x) == 1 for x in last):
-            await mute_user(update)
-            await update.message.reply_text(
-                f"{uid} 已触发自研防炸群风控模型，误封请联系管理员"
-            )
-            return
+    groups.add(gid)
 
-    combined = "".join(user_history[uid])
+    save_data()
+
+    await update.message.reply_text("群组已添加")
+
+async def del_group(update:Update,context:ContextTypes.DEFAULT_TYPE):
+
+    if update.effective_user.id!=ADMIN_ID:
+        return
+
+    gid=int(context.args[0])
+
+    groups.discard(gid)
+
+    save_data()
+
+    await update.message.reply_text("群组已删除")
+
+async def add_kw(update:Update,context:ContextTypes.DEFAULT_TYPE):
+
+    if update.effective_user.id!=ADMIN_ID:
+        return
+
+    text=update.message.text.replace("/addkw","").strip()
+
+    for line in text.split("\n"):
+        keywords.add(line.strip())
+
+    save_data()
+
+    await update.message.reply_text("关键词已增加")
+
+async def export_data(update:Update,context:ContextTypes.DEFAULT_TYPE):
+
+    if update.effective_user.id!=ADMIN_ID:
+        return
+
+    data={
+        "groups":list(groups),
+        "keywords":list(keywords),
+        "params":PARAMS
+    }
+
+    await update.message.reply_text(json.dumps(data,indent=2))
+
+# =========================
+# ADMIN PANEL
+# =========================
+
+MENU,SETVAL=range(2)
+
+async def admin_panel(update:Update,context:ContextTypes.DEFAULT_TYPE):
+
+    if update.effective_user.id!=ADMIN_ID:
+        return ConversationHandler.END
+
+    keyboard=[
+
+        [InlineKeyboardButton("风控分数",callback_data="score_threshold")],
+        [InlineKeyboardButton("单字次数",callback_data="single_char_limit")],
+        [InlineKeyboardButton("用户名分数",callback_data="username_score")],
+        [InlineKeyboardButton("链接分数",callback_data="link_score")],
+        [InlineKeyboardButton("冷却时间",callback_data="cooldown")],
+        [InlineKeyboardButton("BIO提醒",callback_data="bio_alert")]
+
+    ]
+
+    await update.message.reply_text(
+        "管理员面板",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+    return MENU
+
+async def admin_menu(update:Update,context:ContextTypes.DEFAULT_TYPE):
+
+    query=update.callback_query
+
+    await query.answer()
+
+    key=query.data
+
+    if key=="bio_alert":
+
+        PARAMS["bio_alert"]=not PARAMS["bio_alert"]
+
+        save_data()
+
+        await query.edit_message_text(f"BIO提醒已切换: {PARAMS['bio_alert']}")
+
+        return ConversationHandler.END
+
+    context.user_data["edit_key"]=key
+
+    await query.edit_message_text(f"当前值: {PARAMS[key]}\n请输入新值")
+
+    return SETVAL
+
+async def admin_set(update:Update,context:ContextTypes.DEFAULT_TYPE):
+
+    key=context.user_data.get("edit_key")
+
+    try:
+
+        val=int(update.message.text)
+
+    except:
+
+        await update.message.reply_text("请输入数字")
+
+        return SETVAL
+
+    PARAMS[key]=val
+
+    save_data()
+
+    await update.message.reply_text("已更新")
+
+    return ConversationHandler.END
+
+# =========================
+# 风控检测
+# =========================
+
+async def handle_message(update:Update,context:ContextTypes.DEFAULT_TYPE):
+
+    if update.effective_chat.id not in groups:
+        return
+
+    user=update.effective_user
+
+    text=update.message.text or ""
+
+    uid=user.id
+
+    # 单字检测
+
+    if is_single_char(text):
+
+        user_last_messages[uid].append(1)
+
+    else:
+
+        user_last_messages[uid].clear()
+
+    if len(user_last_messages[uid])>=PARAMS["single_char_limit"]:
+
+        await update.effective_chat.restrict_member(uid)
+
+        await update.message.reply_text(
+            f"{uid} 已触发防炸群模型"
+        )
+
+        return
+
+    # 关键词检测
+
     for kw in keywords:
-        if kw in combined:
-            await mute_user(update)
-            await update.message.reply_text(f"{uid} 已触发关键词风控模型")
+
+        if kw in text:
+
+            await update.effective_chat.restrict_member(uid)
+
             return
 
-    # 用户名异常
-    if check_username(user):
-        score = update_score(uid, 2)
-        if score >= SCORE_THRESHOLD:
-            await mute_user(update)
-            await update.message.reply_text("用户名异常已禁言")
-            return
+    score=0
 
-    # 消息中含链接
-    if link_regex.search(text):
-        update_score(uid,1)
+    # 用户名检测
 
-    # BIO检查
-    bio = await get_user_bio(context.bot, chat.id, uid)
-    if bio:
-        if link_regex.search(bio):
-            key = (chat.id, uid)
-            now = time.time()
-            if key not in bio_warn_cooldown or now - bio_warn_cooldown[key] > 60:
-                bio_warn_cooldown[key] = now
-                await update.message.reply_text("该用户简介包含链接，疑似引流，注意甄别")
-        update_score(uid,1)
+    name=(user.username or "")+(user.full_name or "")
 
-    # 总分判断
-    if get_score(uid) >= SCORE_THRESHOLD:
-        await mute_user(update)
-        await update.message.reply_text("用户行为异常已禁言")
+    if "资源" in name or "看片" in name or "福利" in name:
 
-# ===== 启动 =====
+        score+=PARAMS["username_score"]
+
+    # 链接检测
+
+    if contains_link(text):
+
+        score+=PARAMS["link_score"]
+
+    user_scores[uid]+=score
+
+    if user_scores[uid]>=PARAMS["score_threshold"]:
+
+        await update.effective_chat.restrict_member(uid)
+
+        await update.message.reply_text(
+            f"{uid} 已触发自研风控模型"
+        )
+
+    # BIO检测
+
+    if PARAMS["bio_alert"]:
+
+        try:
+
+            bio=await context.bot.get_chat(uid)
+
+            if bio.bio and contains_link(bio.bio):
+
+                await update.message.reply_text(
+                    "该用户简介含链接，疑似引流"
+                )
+
+        except:
+            pass
+
+# =========================
+# 主程序
+# =========================
+
 def main():
-    app = ApplicationBuilder().token(TOKEN).build()
-    app.add_handler(CommandHandler("addgroup", add_group))
-    app.add_handler(CommandHandler("delgroup", remove_group))
-    app.add_handler(CommandHandler("addkw", add_keyword))
-    app.add_handler(CommandHandler("export", export_data))
-    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
 
-    # Polling模式，免费版Railway最稳定
-    app.run_polling(drop_pending_updates=True)
+    load_data()
+
+    app=ApplicationBuilder().token(TOKEN).build()
+
+    app.add_handler(CommandHandler("addgroup",add_group))
+    app.add_handler(CommandHandler("delgroup",del_group))
+    app.add_handler(CommandHandler("addkw",add_kw))
+    app.add_handler(CommandHandler("export",export_data))
+
+    admin_handler=ConversationHandler(
+
+        entry_points=[CommandHandler("admin",admin_panel)],
+
+        states={
+
+            MENU:[CallbackQueryHandler(admin_menu)],
+
+            SETVAL:[MessageHandler(filters.TEXT & ~filters.COMMAND,admin_set)]
+
+        },
+
+        fallbacks=[]
+
+    )
+
+    app.add_handler(admin_handler)
+
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,handle_message))
+
+    app.run_polling()
 
 if __name__=="__main__":
     main()
