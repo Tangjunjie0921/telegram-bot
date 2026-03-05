@@ -465,20 +465,15 @@ def main():
     app.add_handler(CommandHandler("export", export_data))
 
     admin_handler = ConversationHandler(
-
-        entry_points=[CommandHandler("admin", admin_panel)],
-
-        states={
-
-            MENU: [CallbackQueryHandler(admin_menu)],
-            SETVAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_set)]
-
-        },
-
-        fallbacks=[]
-        per_chat=True
-        per_user=True
-    )
+    entry_points=[CommandHandler("admin", admin_panel)],
+    states={
+        MENU: [CallbackQueryHandler(admin_menu)],
+        SETVAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_set)]
+    },
+    fallbacks=[],
+    per_chat=True,
+    per_user=True
+)
 
     app.add_handler(admin_handler)
 
