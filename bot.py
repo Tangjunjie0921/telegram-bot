@@ -26,9 +26,9 @@ TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_ID = 8276405169
 DATA_FILE = "data.json"
 
-# ========================
-# 默认参数（可在admin面板调整）
-# ========================
+# ======================
+# 参数
+# ======================
 
 PARAMS = {
     "score_threshold": 3,
@@ -39,24 +39,47 @@ PARAMS = {
     "bio_alert": True
 }
 
-# ========================
-# 数据存储
-# ========================
+# ======================
+# 数据
+# ======================
 
 groups = set()
 keywords = set()
 
 user_scores = defaultdict(int)
 user_chars = defaultdict(lambda: deque(maxlen=5))
+user_recent = defaultdict(lambda: deque(maxlen=6))
 
 bio_cache = {}
 bio_cache_time = {}
 
 BIO_CACHE_TTL = 600
 
-# ========================
+# ======================
+# 拼字词库
+# ======================
+
+SPAM_PATTERNS = [
+    "点我头像",
+    "点击头像",
+    "私聊我",
+    "dian",
+    "diantouxiang"
+]
+
+USERNAME_PATTERNS = [
+    "资源",
+    "看片",
+    "福利",
+    "萝莉",
+    "幼女",
+    "头像",
+    "私聊"
+]
+
+# ======================
 # 数据持久化
-# ========================
+# ======================
 
 def load_data():
 
@@ -86,13 +109,13 @@ def save_data():
             f
         )
 
-# ========================
-# 工具函数
-# ========================
+# ======================
+# 工具
+# ======================
 
 def contains_link(text):
 
-    pattern = r"(https?://|t\.me/|telegram\.me)"
+    pattern = r"(https?://|t\.me/)"
 
     return re.search(pattern, text, re.IGNORECASE)
 
@@ -117,7 +140,7 @@ async def mute_user(chat, user_id):
             permissions
         )
 
-    except Exception:
+    except:
         pass
 
 
@@ -142,13 +165,13 @@ async def get_bio_cached(context, user_id):
 
         return bio
 
-    except Exception:
+    except:
 
         return ""
 
-# ========================
+# ======================
 # 管理员命令
-# ========================
+# ======================
 
 async def add_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
@@ -213,9 +236,9 @@ async def export_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
         json.dumps(data, indent=2)
     )
 
-# ========================
+# ======================
 # ADMIN 面板
-# ========================
+# ======================
 
 MENU, SETVAL = range(2)
 
@@ -227,15 +250,10 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
 
         [InlineKeyboardButton("风控分数", callback_data="score_threshold")],
-
         [InlineKeyboardButton("单字次数", callback_data="single_char_limit")],
-
         [InlineKeyboardButton("用户名分数", callback_data="username_score")],
-
         [InlineKeyboardButton("链接分数", callback_data="link_score")],
-
         [InlineKeyboardButton("冷却时间", callback_data="cooldown")],
-
         [InlineKeyboardButton("BIO提醒开关", callback_data="bio_alert")]
 
     ]
@@ -292,7 +310,7 @@ async def admin_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         val = int(update.message.text)
 
-    except Exception:
+    except:
 
         await update.message.reply_text("请输入数字")
 
@@ -306,9 +324,9 @@ async def admin_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     return ConversationHandler.END
 
-# ========================
+# ======================
 # 消息监听
-# ========================
+# ======================
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
@@ -318,14 +336,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     user = update.effective_user
-
     text = update.message.text or ""
-
     uid = user.id
 
-    # ========================
-    # 单字爆破检测
-    # ========================
+    # ======================
+    # 单字检测
+    # ======================
 
     if is_single_char(text):
 
@@ -341,15 +357,37 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await update.message.reply_text(
 
-            f"{uid} 已触发自研防炸群风控模型，误封请联系管理员解封"
+            f"{uid} 已触发防炸群风控模型"
 
         )
 
         return
 
-    # ========================
+    # ======================
+    # 拼字检测
+    # ======================
+
+    user_recent[uid].append(text)
+
+    joined = "".join(user_recent[uid]).lower()
+
+    for pattern in SPAM_PATTERNS:
+
+        if pattern in joined:
+
+            await mute_user(chat, uid)
+
+            await update.message.reply_text(
+
+                f"{uid} 疑似引流拼字行为"
+
+            )
+
+            return
+
+    # ======================
     # 关键词检测
-    # ========================
+    # ======================
 
     for kw in keywords:
 
@@ -361,19 +399,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     score = 0
 
-    # ========================
+    # ======================
     # 用户名检测
-    # ========================
+    # ======================
 
     name = (user.username or "") + (user.full_name or "")
 
-    if any(x in name for x in ["资源", "看片", "福利"]):
+    for p in USERNAME_PATTERNS:
 
-        score += PARAMS["username_score"]
+        if p in name:
 
-    # ========================
+            score += PARAMS["username_score"]
+
+            break
+
+    # ======================
     # 链接检测
-    # ========================
+    # ======================
 
     if contains_link(text):
 
@@ -387,13 +429,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await update.message.reply_text(
 
-            f"{uid} 已触发自研防炸群风控模型"
+            f"{uid} 已触发自研风控模型"
 
         )
 
-    # ========================
+    # ======================
     # BIO检测
-    # ========================
+    # ======================
 
     if PARAMS["bio_alert"]:
 
@@ -407,9 +449,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             )
 
-# ========================
+# ======================
 # 主程序
-# ========================
+# ======================
 
 def main():
 
@@ -418,11 +460,8 @@ def main():
     app = ApplicationBuilder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("addgroup", add_group))
-
     app.add_handler(CommandHandler("delgroup", del_group))
-
     app.add_handler(CommandHandler("addkw", add_kw))
-
     app.add_handler(CommandHandler("export", export_data))
 
     admin_handler = ConversationHandler(
@@ -432,14 +471,11 @@ def main():
         states={
 
             MENU: [CallbackQueryHandler(admin_menu)],
-
             SETVAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_set)]
 
         },
 
-        fallbacks=[],
-
-        per_message=True
+        fallbacks=[]
     )
 
     app.add_handler(admin_handler)
