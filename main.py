@@ -5,7 +5,7 @@ from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ChatPermissions
 
 # ==================== 配置（Railway 环境变量） ====================
 TOKEN = os.getenv("BOT_TOKEN")
@@ -15,7 +15,6 @@ ADMIN_ID = int(os.getenv("ADMIN_ID"))
 if not all([TOKEN, GROUP_ID, ADMIN_ID]):
     raise ValueError("❌ 请在 Railway 设置环境变量: BOT_TOKEN, GROUP_ID, ADMIN_ID")
 
-# ✅ 已修复：使用官方推荐的 DefaultBotProperties（aiogram 3.7+ 强制要求）
 bot = Bot(
     token=TOKEN,
     default=DefaultBotProperties(parse_mode=ParseMode.HTML)
@@ -24,9 +23,18 @@ dp = Dispatcher()
 router = Router()
 dp.include_router(router)
 
-DATA_FILE = "/data/reports.json"   # Railway Volume 推荐路径（免费计划重启会丢失）
-reports = {}  # original_msg_id -> {"warning_id": int, "suspect_id": int, "chat_id": int, "reporters": set}
+DATA_FILE = "/data/reports.json"
+reports = {}
 lock = asyncio.Lock()
+
+# ==================== 敏感词列表（已包含你之前要求的关键词） ====================
+SPAM_KEYWORDS = [
+    "qq:", "qq：", "qq号", "加qq", "扣扣",
+    "微信", "wx:", "weixin", "加我微信", "wxid_",
+    "幼女", "萝莉", "少妇", "人妻", "熟女", "福利", "约炮", "约", "反差", "外围",
+    "空姐", "学生妹", "嫩模", "资源", "种子", "磁力", "破解", "独家资源",
+    "飞机", "加群", "进群", "私聊我", "私我", "互推", "拉人",
+]
 
 # ==================== 数据持久化 ====================
 async def load_data():
@@ -63,11 +71,19 @@ async def check_user_bio(message: Message):
     try:
         chat_info = await bot.get_chat(user.id)
         bio = (chat_info.bio or "").lower()
-        if any(x in bio for x in ["http://", "https://", "t.me/", "@"]):
+
+        has_link = any(x in bio for x in ["http://", "https://", "t.me/", "@"])
+        has_spam_keyword = any(keyword.lower() in bio for keyword in SPAM_KEYWORDS)
+
+        if has_link or has_spam_keyword:
+            keyword_text = "链接" if has_link else "敏感词"
+            if has_link and has_spam_keyword:
+                keyword_text = "链接 + 敏感词"
+
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="举报该用户", callback_data=f"report:{message.message_id}")]
             ])
-            text = f"⚠️ 简介有链接，疑似广告引流\n用户ID: {user.id}\n举报数: 0"
+            text = f"⚠️ 简介疑似广告/引流（含{keyword_text}）\n用户ID: {user.id}\n举报数: 0"
             warning = await message.reply(text, reply_markup=keyboard)
 
             async with lock:
@@ -78,10 +94,11 @@ async def check_user_bio(message: Message):
                     "reporters": set()
                 }
             await save_data()
+            print(f"检测到可疑 bio: 用户 {user.id} - {bio[:60]}...")
     except Exception:
-        pass  # 用户隐私设置或无法获取，静默跳过
+        pass
 
-# ==================== 功能 B：举报系统 ====================
+# ==================== 功能 B：举报系统（1人即可显示管理员封禁按钮） ====================
 @router.callback_query(F.data.startswith("report:"))
 async def handle_report(callback: CallbackQuery):
     try:
@@ -102,21 +119,27 @@ async def handle_report(callback: CallbackQuery):
             warning_id = data["warning_id"]
             chat_id = data["chat_id"]
 
+        current_markup = callback.message.reply_markup
+        # 只要 >=1 人举报就显示管理员封禁按钮
+        ban_button = InlineKeyboardButton(text="管理员封禁", callback_data=f"ban:{original_id}")
+        keyboard_list = current_markup.inline_keyboard[:] if current_markup and current_markup.inline_keyboard else []
+        # 防止重复添加按钮
+        if not any("ban:" in str(btn.callback_data) for row in keyboard_list for btn in row):
+            keyboard_list.append([ban_button])
+        new_keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_list)
+
         if count >= 3:
             new_text = f"🚨 超3人举报，已通知管理员\n用户ID: {suspect_id}\n举报人数: {count}"
-            await bot.edit_message_text(
-                chat_id=chat_id, message_id=warning_id, text=new_text, reply_markup=None
-            )
             await bot.send_message(
                 ADMIN_ID,
                 f"🚨 用户被多人举报\n用户ID: {suspect_id}\n举报人数: {count}\n群组ID: {chat_id}"
             )
         else:
-            new_text = f"⚠️ 简介有链接，疑似广告引流\n用户ID: {suspect_id}\n举报数: {count}"
-            await bot.edit_message_text(
-                chat_id=chat_id, message_id=warning_id, text=new_text,
-                reply_markup=callback.message.reply_markup
-            )
+            new_text = f"🚨 已有人举报，可由管理员封禁\n用户ID: {suspect_id}\n举报人数: {count}"
+
+        await bot.edit_message_text(
+            chat_id=chat_id, message_id=warning_id, text=new_text, reply_markup=new_keyboard
+        )
 
         await save_data()
         await callback.answer(f"举报成功！当前 {count} 人", show_alert=False)
@@ -124,7 +147,65 @@ async def handle_report(callback: CallbackQuery):
         print("举报处理异常（已捕获）:", e)
         await callback.answer("操作失败")
 
-# ==================== 功能 C：原消息删除 → 同步删除提示 ====================
+# ==================== 管理员封禁回调（限制权限，非踢出） ====================
+@router.callback_query(F.data.startswith("ban:"))
+async def handle_ban(callback: CallbackQuery):
+    try:
+        original_id = int(callback.data.split(":", 1)[1])
+        caller_id = callback.from_user.id
+        chat_id = callback.message.chat.id
+
+        if caller_id != ADMIN_ID:
+            await callback.answer("只有管理员可以执行限制权限操作", show_alert=True)
+            return
+
+        async with lock:
+            if original_id not in reports:
+                await callback.answer("举报记录已过期", show_alert=True)
+                return
+            data = reports[original_id]
+            suspect_id = data["suspect_id"]
+            warning_id = data["warning_id"]
+
+        await bot.restrict_chat_member(
+            chat_id=chat_id,
+            user_id=suspect_id,
+            permissions=ChatPermissions(
+                can_send_messages=False,
+                can_send_media_messages=False,
+                can_send_polls=False,
+                can_send_other_messages=False,
+                can_add_web_page_previews=False,
+                can_change_info=False,
+                can_invite_users=False,
+                can_pin_messages=False,
+            )
+        )
+
+        new_text = f"🚨 已由管理员限制群组权限\n用户ID: {suspect_id}\n举报人数: {len(data['reporters'])}"
+        await bot.edit_message_text(
+            chat_id=chat_id, message_id=warning_id, text=new_text, reply_markup=None
+        )
+
+        await callback.answer("用户已永久限制所有权限", show_alert=True)
+        print(f"管理员 {caller_id} 已限制用户 {suspect_id} 的群组权限")
+
+        async with lock:
+            reports.pop(original_id, None)
+        await save_data()
+
+    except TelegramBadRequest as e:
+        if "user_not_participant" in str(e).lower():
+            await callback.answer("用户不在群组中", show_alert=True)
+        elif "not enough rights" in str(e).lower():
+            await callback.answer("机器人缺少限制权限，请检查管理员设置", show_alert=True)
+        else:
+            await callback.answer(f"操作失败: {str(e)}", show_alert=True)
+    except Exception as e:
+        print("限制权限异常:", e)
+        await callback.answer("操作失败", show_alert=True)
+
+# ==================== 功能 C：消息删除同步 ====================
 async def cleanup_deleted_messages():
     while True:
         await asyncio.sleep(300)
@@ -155,7 +236,7 @@ async def cleanup_deleted_messages():
 
 # ==================== 启动 ====================
 async def main():
-    print("🚀 防广告机器人启动成功（aiogram 3.14+ + Railway 规范）")
+    print("🚀 防广告机器人启动成功（1人举报即显示管理员封禁按钮）")
     await load_data()
     asyncio.create_task(cleanup_deleted_messages())
     await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
