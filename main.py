@@ -48,7 +48,7 @@ FILL_GARBAGE_MIN_RAW_LEN = 12     # 原始长度 ≥12
 FILL_GARBAGE_MAX_CLEAN_LEN = 8    # 清理后有效长度 ≤8
 FILL_SPACE_RATIO = 0.30           # 空格比例 ≥30%
 
-FILL_CHARS = set(" .,，。！？*\~`-_=+[]{}()\"'\\|\n\t\r　")  # 填充字符集
+FILL_CHARS = set(r" .,，。！？*\~`-_=+[]{}()\"'\\|\n\t\r　")  # 填充字符集
 
 # 用户短消息历史（仅内存，安全）
 user_short_msg_history = {}       # user_id -> deque([(time, text), ...])
