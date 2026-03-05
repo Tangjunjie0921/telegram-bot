@@ -20,13 +20,6 @@ ADMIN_ID = 8276405169
 if not TOKEN:
     raise ValueError("请设置环境变量 BOT_TOKEN")
 
-# Railway 会分配端口
-PORT = int(os.environ.get("PORT", 8000))
-
-# 这里填你的 Railway 项目域名，例如：
-RAILWAY_DOMAIN = "你的Railway域名.up.railway.app"
-WEBHOOK_URL = f"https://{RAILWAY_DOMAIN}/{TOKEN}"
-
 # ===== 文件 =====
 KEYWORDS_FILE = "keywords.json"
 GROUPS_FILE = "groups.json"
@@ -74,7 +67,6 @@ def update_score(uid, points):
     now = time.time()
     if uid not in user_scores:
         user_scores[uid] = {"score":0, "time":now}
-    # 5分钟无行为清零
     if now - user_scores[uid]["time"] > 300:
         user_scores[uid]["score"] = 0
     user_scores[uid]["score"] += points
@@ -203,14 +195,8 @@ def main():
     app.add_handler(CommandHandler("export", export_data))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
 
-    # v20+ run_webhook 正确用法
-    app.run_webhook(
-        listen="0.0.0.0",
-        port=PORT,
-        url_path=TOKEN,               # webhook path
-        webhook_url=WEBHOOK_URL,      # Telegram访问完整URL
-        drop_pending_updates=True
-    )
+    # Polling模式，免费版Railway最稳定
+    app.run_polling(drop_pending_updates=True)
 
 if __name__=="__main__":
     main()
