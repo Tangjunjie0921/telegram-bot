@@ -20,11 +20,12 @@ ADMIN_ID = 8276405169
 if not TOKEN:
     raise ValueError("请设置环境变量 BOT_TOKEN")
 
-# Railway 会分配 PORT
+# Railway 会分配端口
 PORT = int(os.environ.get("PORT", 8000))
-# 手动指定你的 Railway 项目 URL，用于 webhook
-# 替换为你的实际域名
-RAILWAY_URL = f"https://你的Railway域名.up.railway.app/{TOKEN}"
+
+# 这里填你的 Railway 项目域名，例如：
+RAILWAY_DOMAIN = "你的Railway域名.up.railway.app"
+WEBHOOK_URL = f"https://{RAILWAY_DOMAIN}/{TOKEN}"
 
 # ===== 文件 =====
 KEYWORDS_FILE = "keywords.json"
@@ -46,11 +47,7 @@ USERNAME_BAD_WORDS = [
     "资源","看片","卖片","成人视频","幼女","福利","点我头像","私聊我"
 ]
 
-BIO_KEYWORDS = [
-    "资源","看片","福利","幼女"
-]
-
-# ===== 工具 =====
+# ===== 工具函数 =====
 def load_json(file):
     if not os.path.exists(file):
         return []
@@ -77,7 +74,8 @@ def update_score(uid, points):
     now = time.time()
     if uid not in user_scores:
         user_scores[uid] = {"score":0, "time":now}
-    if now - user_scores[uid]["time"] > 300:  # 5分钟无行为清零
+    # 5分钟无行为清零
+    if now - user_scores[uid]["time"] > 300:
         user_scores[uid]["score"] = 0
     user_scores[uid]["score"] += points
     user_scores[uid]["time"] = now
@@ -205,7 +203,14 @@ def main():
     app.add_handler(CommandHandler("export", export_data))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
 
-    app.run_webhook(listen="0.0.0.0", port=PORT, webhook_url=RAILWAY_URL)
+    # v20+ run_webhook 正确用法
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        url_path=TOKEN,               # webhook path
+        webhook_url=WEBHOOK_URL,      # Telegram访问完整URL
+        drop_pending_updates=True
+    )
 
 if __name__=="__main__":
     main()
