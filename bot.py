@@ -515,6 +515,7 @@ def main():
 
     app = ApplicationBuilder().token(TOKEN).build()
 
+
 # 消息监听（只处理文本消息）
     app.add_handler(MessageHandler(filters.TEXT & \~filters.COMMAND, handle_message))
 
@@ -539,7 +540,7 @@ def main():
         per_user=True
     )
     app.add_handler(conv_handler)
-
+#确实
     # 定时保存（每5分钟）
     job_queue: JobQueue = app.job_queue
     job_queue.run_repeating(timed_save, interval=300, first=60)
