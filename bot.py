@@ -476,6 +476,8 @@ def main():
         },
 
         fallbacks=[]
+        per_chat=True
+        per_user=True
     )
 
     app.add_handler(admin_handler)
