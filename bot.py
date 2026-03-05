@@ -20,15 +20,17 @@ ADMIN_ID = 8276405169
 if not TOKEN:
     raise ValueError("请设置环境变量 BOT_TOKEN")
 
-RAILWAY_URL = os.environ.get("RAILWAY_STATIC_URL")
-if not RAILWAY_URL:
-    raise ValueError("请设置环境变量 RAILWAY_STATIC_URL")
+# Railway 会分配 PORT
+PORT = int(os.environ.get("PORT", 8000))
+# 手动指定你的 Railway 项目 URL，用于 webhook
+# 替换为你的实际域名
+RAILWAY_URL = f"https://你的Railway域名.up.railway.app/{TOKEN}"
 
-RAILWAY_URL = RAILWAY_URL.rstrip("/") + "/" + TOKEN
-
+# ===== 文件 =====
 KEYWORDS_FILE = "keywords.json"
 GROUPS_FILE = "groups.json"
 
+# ===== 参数 =====
 SCORE_THRESHOLD = 3
 
 # ===== 数据结构 =====
@@ -37,19 +39,18 @@ user_history = defaultdict(lambda: deque(maxlen=5))
 user_cache = {}
 bio_warn_cooldown = {}
 
-# ===== 正则规则 =====
+# ===== 正则 =====
 link_regex = re.compile(r"(http|t\.me|\.com|\.xyz|\.top|\.cc|\.net)")
 
 USERNAME_BAD_WORDS = [
-    "资源", "看片", "卖片", "成人视频",
-    "幼女", "福利", "点我头像", "私聊我"
+    "资源","看片","卖片","成人视频","幼女","福利","点我头像","私聊我"
 ]
 
 BIO_KEYWORDS = [
-    "资源", "看片", "福利", "幼女"
+    "资源","看片","福利","幼女"
 ]
 
-# ===== 工具函数 =====
+# ===== 工具 =====
 def load_json(file):
     if not os.path.exists(file):
         return []
@@ -204,8 +205,7 @@ def main():
     app.add_handler(CommandHandler("export", export_data))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
 
-    port = int(os.environ.get("PORT", 8000))
-    app.run_webhook(listen="0.0.0.0", port=port, webhook_url=RAILWAY_URL)
+    app.run_webhook(listen="0.0.0.0", port=PORT, webhook_url=RAILWAY_URL)
 
 if __name__=="__main__":
     main()
