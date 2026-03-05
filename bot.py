@@ -516,6 +516,7 @@ def main():
     app = ApplicationBuilder().token(TOKEN).build()
 
     # 消息监听（只处理文本消息）
+# 消息监听（只处理文本消息）
     app.add_handler(MessageHandler(filters.TEXT & \~filters.COMMAND, handle_message))
 
     # 管理员面板对话
