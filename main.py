@@ -41,22 +41,39 @@ dp.include_router(router)
 DATA_FILE = "/data/reports.json"
 BIO_KEYWORDS_FILE = "/data/bio_keywords.json"
 BLACKLIST_CONFIG_FILE = "/data/blacklist_config.json"
+AUTOREPLY_RULES_FILE = "/data/autoreply_rules.json"  # 新增：自动回复规则
 reports = {}
 lock = asyncio.Lock()
 
 exempt_users = {}
-
-# 退群拉黑配置：群ID(str) → {"enabled": bool, "duration": int秒，0=永久}
 blacklist_config = {}
 
+# 自动回复规则：群ID(str) → {"enabled": bool, "keywords": list, "reply_text": str, "buttons": list, "delete_user_sec": int, "delete_bot_sec": int, "reply_all": bool, "quote": bool}
+autoreply_rules = {}
+
+async def load_autoreply_rules():
+    global autoreply_rules
+    try:
+        if os.path.exists(AUTOREPLY_RULES_FILE):
+            with open(AUTOREPLY_RULES_FILE, "r", encoding="utf-8") as f:
+                autoreply_rules = json.load(f)
+    except Exception as e:
+        print("加载自动回复规则失败:", e)
+
+async def save_autoreply_rules():
+    try:
+        with open(AUTOREPLY_RULES_FILE, "w", encoding="utf-8") as f:
+            json.dump(autoreply_rules, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print("保存自动回复规则失败:", e)
+
+# 原有 load 函数...
 async def load_blacklist_config():
     global blacklist_config
     try:
         if os.path.exists(BLACKLIST_CONFIG_FILE):
             with open(BLACKLIST_CONFIG_FILE, "r", encoding="utf-8") as f:
                 blacklist_config = json.load(f)
-        else:
-            blacklist_config = {}
     except Exception as e:
         print("加载黑名单配置失败:", e)
 
@@ -95,6 +112,7 @@ async def load_all():
     print(f"bio 关键词加载完成: {len(BIO_KEYWORDS)} 个")
     print(f"显示名称关键词: {len(DISPLAY_NAME_KEYWORDS)} 个")
     await load_blacklist_config()
+    await load_autoreply_rules()
 
 class AdminStates(StatesGroup):
     ChoosingGroup = State()
@@ -104,20 +122,13 @@ class AdminStates(StatesGroup):
     AddingDispKw = State()
     DeletingDispKw = State()
     SettingBlacklist = State()
+    AutoreplyMenu = State()  # 新增：自动回复主菜单
+    AutoreplyEditKeywords = State()
+    AutoreplyEditText = State()
+    AutoreplyEditButtons = State()
+    AutoreplyEditDelete = State()
 
-def get_group_selection_keyboard():
-    buttons = []
-    row = []
-    for gid in sorted(GROUP_IDS):
-        row.append(InlineKeyboardButton(text=f"群 {gid}", callback_data=f"group:{gid}"))
-        if len(row) == 2:
-            buttons.append(row)
-            row = []
-    if row:
-        buttons.append(row)
-    buttons.append([InlineKeyboardButton(text="← 返回主菜单", callback_data="back_to_main")])
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
-
+# 键盘工具（子菜单加新按钮）
 def get_group_menu_keyboard(group_id: int):
     buttons = [
         [InlineKeyboardButton(text="添加简介敏感词", callback_data=f"add_bio:{group_id}")],
@@ -127,381 +138,204 @@ def get_group_menu_keyboard(group_id: int):
         [InlineKeyboardButton(text="删除显示名敏感词", callback_data=f"del_disp:{group_id}")],
         [InlineKeyboardButton(text="查看显示名敏感词", callback_data=f"list_disp:{group_id}")],
         [InlineKeyboardButton(text="退群自动拉黑", callback_data=f"blacklist:{group_id}")],
+        [InlineKeyboardButton(text="自动回复规则", callback_data=f"autoreply:{group_id}")],
         [InlineKeyboardButton(text="← 返回主菜单", callback_data="back_to_main")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-def get_blacklist_duration_keyboard(group_id: int):
+def get_autoreply_menu_keyboard(group_id: int):
+    rule = autoreply_rules.get(str(group_id), {"enabled": False})
+    status = "已开启" if rule.get("enabled", False) else "已关闭"
     buttons = [
-        [InlineKeyboardButton(text="开启 - 1小时", callback_data=f"blacklist_set:{group_id}:3600")],
-        [InlineKeyboardButton(text="开启 - 1周", callback_data=f"blacklist_set:{group_id}:604800")],
-        [InlineKeyboardButton(text="开启 - 永久", callback_data=f"blacklist_set:{group_id}:0")],
-        [InlineKeyboardButton(text="关闭自动拉黑", callback_data=f"blacklist_set:{group_id}:off")],
+        [InlineKeyboardButton(text=f"开关：{status}", callback_data=f"autoreply_toggle:{group_id}")],
+        [InlineKeyboardButton(text="编辑关键词", callback_data=f"autoreply_keywords:{group_id}")],
+        [InlineKeyboardButton(text="编辑回复内容", callback_data=f"autoreply_text:{group_id}")],
+        [InlineKeyboardButton(text="编辑附加按钮", callback_data=f"autoreply_buttons:{group_id}")],
+        [InlineKeyboardButton(text="设置删除延时", callback_data=f"autoreply_delete:{group_id}")],
         [InlineKeyboardButton(text="← 返回子菜单", callback_data=f"group:{group_id}")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-def get_confirm_keyboard(action: str):
-    return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="✅ 确认", callback_data=f"confirm:{action}"),
-        InlineKeyboardButton(text="❌ 取消并返回", callback_data="cancel"),
-    ]])
-
-@router.message(Command("admin"), F.chat.type == "private", F.from_user.id.in_(ADMIN_IDS))
-async def cmd_admin(message: Message, state: FSMContext):
+    
+# 自动回复规则入口
+@router.callback_query(F.data.startswith("autoreply:"))
+async def enter_autoreply_menu(callback: CallbackQuery, state: FSMContext):
     try:
-        await state.clear()
-        kb = InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="管理群组设置", callback_data="select_group")
-        ]])
-        await message.reply("👑 管理员控制面板\n请选择操作：", reply_markup=kb)
-    except Exception as e:
-        await message.reply(f"打开失败：{str(e)}")
-        
-@router.callback_query(F.data == "select_group")
-async def select_group(callback: CallbackQuery, state: FSMContext):
-    try:
-        if not GROUP_IDS:
-            await callback.message.edit_text("无监控群组")
-            await callback.answer()
-            return
-        kb = get_group_selection_keyboard()
-        await callback.message.edit_text("请选择群组：", reply_markup=kb)
-        await state.set_state(AdminStates.ChoosingGroup)
+        group_id = int(callback.data.split(":", 1)[1])
+        await state.update_data(group_id=group_id)
+        kb = get_autoreply_menu_keyboard(group_id)
+        await callback.message.edit_text("自动回复规则设置", reply_markup=kb)
+        await state.set_state(AdminStates.AutoreplyMenu)
         await callback.answer()
     except Exception as e:
         await callback.answer(f"失败：{str(e)}", show_alert=True)
 
-@router.callback_query(F.data.startswith("group:"))
-async def enter_group_menu(callback: CallbackQuery, state: FSMContext):
+# 开关
+@router.callback_query(F.data.startswith("autoreply_toggle:"))
+async def toggle_autoreply(callback: CallbackQuery, state: FSMContext):
     try:
         group_id = int(callback.data.split(":", 1)[1])
-        if group_id not in GROUP_IDS:
-            await callback.answer("无效群组", show_alert=True)
-            return
-        await state.update_data(group_id=group_id)
-        kb = get_group_menu_keyboard(group_id)
-        await callback.message.edit_text(f"管理群 {group_id}：", reply_markup=kb)
-        await state.set_state(AdminStates.InGroupMenu)
-        await callback.answer()
+        str_gid = str(group_id)
+        if str_gid not in autoreply_rules:
+            autoreply_rules[str_gid] = {"enabled": False, "keywords": [], "reply_text": "", "buttons": [], "delete_user_sec": 0, "delete_bot_sec": 0, "reply_all": True, "quote": True}
+        autoreply_rules[str_gid]["enabled"] = not autoreply_rules[str_gid].get("enabled", False)
+        await save_autoreply_rules()
+        kb = get_autoreply_menu_keyboard(group_id)
+        await callback.message.edit_reply_markup(reply_markup=kb)
+        await callback.answer("已切换开关")
     except Exception as e:
         await callback.answer(f"失败：{str(e)}", show_alert=True)
 
-@router.callback_query(F.data == "back_to_main")
-async def back_to_main(callback: CallbackQuery, state: FSMContext):
-    try:
-        await state.clear()
-        kb = InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="管理群组设置", callback_data="select_group")
-        ]])
-        await callback.message.edit_text("👑 已返回主面板", reply_markup=kb)
-        await callback.answer("返回主菜单")
-    except Exception as e:
-        await callback.answer(f"返回失败：{str(e)}", show_alert=True)
-
-# ==================== 简介关键词功能 ====================
-@router.callback_query(F.data.startswith("add_bio:"))
-async def start_add_bio_kw(callback: CallbackQuery, state: FSMContext):
+# 编辑关键词
+@router.callback_query(F.data.startswith("autoreply_keywords:"))
+async def start_edit_keywords(callback: CallbackQuery, state: FSMContext):
     try:
         group_id = int(callback.data.split(":", 1)[1])
         await state.update_data(group_id=group_id)
-        await callback.message.edit_text("请输入要添加的简介敏感词（一行一个）：", reply_markup=None)
+        str_gid = str(group_id)
+        current = autoreply_rules.get(str_gid, {}).get("keywords", [])
+        text = "当前关键词（一行一个）：\n" + "\n".join(current) if current else "暂无关键词"
+        text += "\n\n请输入要添加/替换的关键词（一行一个），或发送 /clear 清空："
+        await callback.message.edit_text(text, reply_markup=None)
         await callback.message.answer("输入完发送", reply_markup=ReplyKeyboardRemove())
-        await state.set_state(AdminStates.AddingBioKw)
+        await state.set_state(AdminStates.AutoreplyEditKeywords)
         await callback.answer()
     except Exception as e:
         await callback.answer(f"失败：{str(e)}", show_alert=True)
 
-@router.message(StateFilter(AdminStates.AddingBioKw))
-async def process_add_bio_kw(message: Message, state: FSMContext):
-    try:
-        words = [w.strip().lower() for w in (message.text or "").splitlines() if w.strip()]
-        if not words:
-            await message.reply("无有效词，请重新输入")
-            return
-        text = "确认添加？\n" + "\n".join(f"• {w}" for w in words)
-        await message.reply(text, reply_markup=get_confirm_keyboard("add_bio"))
-        await state.update_data(words=words)
-    except Exception as e:
-        await message.reply(f"处理失败：{str(e)}")
-
-@router.callback_query(F.data == "confirm:add_bio")
-async def confirm_add_bio(callback: CallbackQuery, state: FSMContext):
+@router.message(StateFilter(AdminStates.AutoreplyEditKeywords))
+async def process_edit_keywords(message: Message, state: FSMContext):
     try:
         data = await state.get_data()
-        words = data.get("words", [])
-        if not words:
-            await callback.answer("无内容", show_alert=True)
-            return
-        async with lock:
-            added = [w for w in words if w not in BIO_KEYWORDS]
-            BIO_KEYWORDS.extend(added)
-            with open(BIO_KEYWORDS_FILE, "w", encoding="utf-8") as f:
-                json.dump(BIO_KEYWORDS, f, ensure_ascii=False, indent=2)
-        msg = f"已添加 {len(added)} 个（总 {len(BIO_KEYWORDS)}）\n返回子菜单"
-        kb = get_group_menu_keyboard(data.get('group_id', 0))
-        await callback.message.edit_text(msg, reply_markup=kb)
-        await state.set_state(AdminStates.InGroupMenu)
-        await callback.answer("成功")
-    except Exception as e:
-        await callback.message.edit_text(f"添加失败：{str(e)}")
-
-@router.callback_query(F.data.startswith("del_bio:"))
-async def start_del_bio_kw(callback: CallbackQuery, state: FSMContext):
-    try:
-        group_id = int(callback.data.split(":", 1)[1])
-        await state.update_data(group_id=group_id)
-        await callback.message.edit_text("请输入要删除的简介敏感词（一行一个）：", reply_markup=None)
-        await callback.message.answer("输入完发送", reply_markup=ReplyKeyboardRemove())
-        await state.set_state(AdminStates.DeletingBioKw)
-        await callback.answer()
-    except Exception as e:
-        await callback.answer(f"失败：{str(e)}", show_alert=True)
-
-@router.message(StateFilter(AdminStates.DeletingBioKw))
-async def process_del_bio_kw(message: Message, state: FSMContext):
-    try:
-        words = [w.strip().lower() for w in (message.text or "").splitlines() if w.strip()]
-        if not words:
-            await message.reply("无有效词，请重新输入")
-            return
-        text = "确认删除？\n" + "\n".join(f"• {w}" for w in words)
-        await message.reply(text, reply_markup=get_confirm_keyboard("del_bio"))
-        await state.update_data(words=words)
-    except Exception as e:
-        await message.reply(f"处理失败：{str(e)}")
-
-@router.callback_query(F.data == "confirm:del_bio")
-async def confirm_del_bio(callback: CallbackQuery, state: FSMContext):
-    try:
-        data = await state.get_data()
-        words = data.get("words", [])
-        if not words:
-            await callback.answer("无内容", show_alert=True)
-            return
-        async with lock:
-            removed = []
-            for w in words:
-                if w in BIO_KEYWORDS:
-                    BIO_KEYWORDS.remove(w)
-                    removed.append(w)
-            if removed:
-                with open(BIO_KEYWORDS_FILE, "w", encoding="utf-8") as f:
-                    json.dump(BIO_KEYWORDS, f, ensure_ascii=False, indent=2)
-        msg = f"已删除 {len(removed)} 个（总 {len(BIO_KEYWORDS)}）\n返回子菜单"
-        kb = get_group_menu_keyboard(data.get('group_id', 0))
-        await callback.message.edit_text(msg, reply_markup=kb)
-        await state.set_state(AdminStates.InGroupMenu)
-        await callback.answer("成功")
-    except Exception as e:
-        await callback.message.edit_text(f"删除失败：{str(e)}")
-
-@router.callback_query(F.data.startswith("list_bio:"))
-async def list_bio_keywords(callback: CallbackQuery, state: FSMContext):
-    try:
-        async with lock:
-            if not BIO_KEYWORDS:
-                text = "当前无简介敏感词"
-            else:
-                text = f"简介敏感词列表（{len(BIO_KEYWORDS)} 个）：\n" + "\n".join(f"• {w}" for w in sorted(BIO_KEYWORDS))
-        data = await state.get_data()
-        group_id = data.get('group_id', 0)
-        kb = get_group_menu_keyboard(group_id)
-        await callback.message.edit_text(text[:4000] + "\n返回子菜单", reply_markup=kb)
-        await callback.answer("已查看")
-    except Exception as e:
-        await callback.message.edit_text(f"查看失败：{str(e)}")
-
-# 添加显示名
-@router.callback_query(F.data.startswith("add_disp:"))
-async def start_add_disp_kw(callback: CallbackQuery, state: FSMContext):
-    try:
-        group_id = int(callback.data.split(":", 1)[1])
-        await state.update_data(group_id=group_id)
-        await callback.message.edit_text("请输入要添加的显示名敏感词（一行一个）：", reply_markup=None)
-        await callback.message.answer("输入完发送", reply_markup=ReplyKeyboardRemove())
-        await state.set_state(AdminStates.AddingDispKw)
-        await callback.answer()
-    except Exception as e:
-        await callback.answer(f"失败：{str(e)}", show_alert=True)
-
-@router.message(StateFilter(AdminStates.AddingDispKw))
-async def process_add_disp_kw(message: Message, state: FSMContext):
-    try:
-        words = [w.strip().lower() for w in (message.text or "").splitlines() if w.strip()]
-        if not words:
-            await message.reply("无有效词，请重新输入")
-            return
-        text = "确认添加？\n" + "\n".join(f"• {w}" for w in words)
-        await message.reply(text, reply_markup=get_confirm_keyboard("add_disp"))
-        await state.update_data(words=words)
-    except Exception as e:
-        await message.reply(f"处理失败：{str(e)}")
-
-@router.callback_query(F.data == "confirm:add_disp")
-async def confirm_add_disp(callback: CallbackQuery, state: FSMContext):
-    try:
-        data = await state.get_data()
-        words = data.get("words", [])
-        if not words:
-            await callback.answer("无内容", show_alert=True)
-            return
-        async with lock:
-            added = [w for w in words if w not in DISPLAY_NAME_KEYWORDS]
-            DISPLAY_NAME_KEYWORDS.extend(added)
-        msg = f"已添加 {len(added)} 个（总 {len(DISPLAY_NAME_KEYWORDS)}）\n返回子菜单"
-        kb = get_group_menu_keyboard(data.get('group_id', 0))
-        await callback.message.edit_text(msg, reply_markup=kb)
-        await state.set_state(AdminStates.InGroupMenu)
-        await callback.answer("成功")
-    except Exception as e:
-        await callback.message.edit_text(f"添加失败：{str(e)}")
-
-# 删除显示名
-@router.callback_query(F.data.startswith("del_disp:"))
-async def start_del_disp_kw(callback: CallbackQuery, state: FSMContext):
-    try:
-        group_id = int(callback.data.split(":", 1)[1])
-        await state.update_data(group_id=group_id)
-        await callback.message.edit_text("请输入要删除的显示名敏感词（一行一个）：", reply_markup=None)
-        await callback.message.answer("输入完发送", reply_markup=ReplyKeyboardRemove())
-        await state.set_state(AdminStates.DeletingDispKw)
-        await callback.answer()
-    except Exception as e:
-        await callback.answer(f"失败：{str(e)}", show_alert=True)
-
-@router.message(StateFilter(AdminStates.DeletingDispKw))
-async def process_del_disp_kw(message: Message, state: FSMContext):
-    try:
-        words = [w.strip().lower() for w in (message.text or "").splitlines() if w.strip()]
-        if not words:
-            await message.reply("无有效词，请重新输入")
-            return
-        text = "确认删除？\n" + "\n".join(f"• {w}" for w in words)
-        await message.reply(text, reply_markup=get_confirm_keyboard("del_disp"))
-        await state.update_data(words=words)
-    except Exception as e:
-        await message.reply(f"处理失败：{str(e)}")
-
-@router.callback_query(F.data == "confirm:del_disp")
-async def confirm_del_disp(callback: CallbackQuery, state: FSMContext):
-    try:
-        data = await state.get_data()
-        words = data.get("words", [])
-        if not words:
-            await callback.answer("无内容", show_alert=True)
-            return
-        async with lock:
-            removed = []
-            for w in words:
-                if w in DISPLAY_NAME_KEYWORDS:
-                    DISPLAY_NAME_KEYWORDS.remove(w)
-                    removed.append(w)
-        msg = f"已删除 {len(removed)} 个（总 {len(DISPLAY_NAME_KEYWORDS)}）\n返回子菜单"
-        kb = get_group_menu_keyboard(data.get('group_id', 0))
-        await callback.message.edit_text(msg, reply_markup=kb)
-        await state.set_state(AdminStates.InGroupMenu)
-        await callback.answer("成功")
-    except Exception as e:
-        await callback.message.edit_text(f"删除失败：{str(e)}")
-
-# 查看显示名
-@router.callback_query(F.data.startswith("list_disp:"))
-async def list_disp_keywords(callback: CallbackQuery, state: FSMContext):
-    try:
-        async with lock:
-            if not DISPLAY_NAME_KEYWORDS:
-                text = "当前无显示名敏感词"
-            else:
-                text = f"显示名敏感词列表（{len(DISPLAY_NAME_KEYWORDS)} 个）：\n" + "\n".join(f"• {w}" for w in sorted(DISPLAY_NAME_KEYWORDS))
-        data = await state.get_data()
-        group_id = data.get('group_id', 0)
-        kb = get_group_menu_keyboard(group_id)
-        await callback.message.edit_text(text[:4000] + "\n返回子菜单", reply_markup=kb)
-        await callback.answer("已查看")
-    except Exception as e:
-        await callback.message.edit_text(f"查看失败：{str(e)}")
-
-# ==================== 退群自动拉黑设置 ====================
-@router.callback_query(F.data.startswith("blacklist:"))
-async def start_blacklist_setting(callback: CallbackQuery, state: FSMContext):
-    try:
-        group_id = int(callback.data.split(":", 1)[1])
-        await state.update_data(group_id=group_id)
-        current = blacklist_config.get(str(group_id), {"enabled": False, "duration": 0})
-        status = "已开启" if current["enabled"] else "已关闭"
-        duration_text = "永久" if current["duration"] == 0 else f"{current['duration']//3600}小时" if current["duration"] % 3600 == 0 else f"{current['duration']}秒"
-        text = f"当前退群自动拉黑：{status}，时长：{duration_text}\n请选择操作："
-        kb = get_blacklist_duration_keyboard(group_id)
-        await callback.message.edit_text(text, reply_markup=kb)
-        await state.set_state(AdminStates.SettingBlacklist)
-        await callback.answer()
-    except Exception as e:
-        await callback.answer(f"失败：{str(e)}", show_alert=True)
-
-@router.callback_query(F.data.startswith("blacklist_set:"))
-async def set_blacklist_duration(callback: CallbackQuery, state: FSMContext):
-    try:
-        parts = callback.data.split(":")
-        group_id = int(parts[1])
-        duration_str = parts[2]
-        if duration_str == "off":
-            enabled = False
-            duration = 0
+        group_id = data.get('group_id')
+        str_gid = str(group_id)
+        text = message.text.strip()
+        if text == "/clear":
+            keywords = []
         else:
-            enabled = True
-            duration = int(duration_str)
-        async with lock:
-            blacklist_config[str(group_id)] = {"enabled": enabled, "duration": duration}
-        await save_blacklist_config()
-        status = "已开启" if enabled else "已关闭"
-        dur_text = "永久" if duration == 0 else f"{duration//3600}小时" if duration % 3600 == 0 else f"{duration}秒"
-        text = f"设置成功！退群自动拉黑：{status}，时长：{dur_text}"
-        kb = get_group_menu_keyboard(group_id)
-        await callback.message.edit_text(text + "\n返回子菜单", reply_markup=kb)
-        await state.set_state(AdminStates.InGroupMenu)
-        await callback.answer("设置成功")
+            keywords = [w.strip().lower() for w in text.splitlines() if w.strip()]
+        if str_gid not in autoreply_rules:
+            autoreply_rules[str_gid] = {"enabled": False}
+        autoreply_rules[str_gid]["keywords"] = keywords
+        await save_autoreply_rules()
+        kb = get_autoreply_menu_keyboard(group_id)
+        await message.reply(f"关键词已更新（{len(keywords)} 个）", reply_markup=kb)
+        await state.set_state(AdminStates.AutoreplyMenu)
     except Exception as e:
-        await callback.answer(f"设置失败：{str(e)}", show_alert=True)
-
-# ==================== 监听退群自动拉黑 ====================
-@router.message(F.chat.id.in_(GROUP_IDS), F.left_chat_member)
-async def on_left_chat_member(message: Message):
+        await message.reply(f"处理失败：{str(e)}")
+        
+# 编辑回复内容
+@router.callback_query(F.data.startswith("autoreply_text:"))
+async def start_edit_text(callback: CallbackQuery, state: FSMContext):
     try:
-        if not message.left_chat_member:
-            return
-
-        group_id = message.chat.id
-        user = message.left_chat_member
-        user_id = user.id
-
-        # 防 bot 自己退群
-        me = await bot.get_me()
-        if user_id == me.id:
-            return
-
-        config = blacklist_config.get(str(group_id), {"enabled": False, "duration": 0})
-        if not config["enabled"]:
-            return
-
-        duration = config["duration"]
-        until_date = 0 if duration == 0 else int(time.time()) + duration
-
-        await bot.ban_chat_member(
-            chat_id=group_id,
-            user_id=user_id,
-            until_date=until_date
-        )
-
-        print(f"退群自动拉黑成功：群 {group_id} 用户 {user_id} 时长 {'永久' if duration == 0 else f'{duration//3600}小时'}")
-    except TelegramBadRequest as e:
-        print(f"拉黑失败（API 错误）：{e}")
+        group_id = int(callback.data.split(":", 1)[1])
+        await state.update_data(group_id=group_id)
+        str_gid = str(group_id)
+        current = autoreply_rules.get(str_gid, {}).get("reply_text", "")
+        text = "当前回复内容：\n" + (current or "暂无内容")
+        text += "\n\n请输入新回复内容（支持变量如 {member} {userId}）："
+        await callback.message.edit_text(text, reply_markup=None)
+        await state.set_state(AdminStates.AutoreplyEditText)
+        await callback.answer()
     except Exception as e:
-        print(f"拉黑未知错误：{e}")
-        import traceback
-        traceback.print_exc()
+        await callback.answer(f"失败：{str(e)}", show_alert=True)
 
-# ==================== 原有群内功能（完整保留） ====================
+@router.message(StateFilter(AdminStates.AutoreplyEditText))
+async def process_edit_text(message: Message, state: FSMContext):
+    try:
+        data = await state.get_data()
+        group_id = data.get('group_id')
+        str_gid = str(group_id)
+        reply_text = message.text.strip()
+        if str_gid not in autoreply_rules:
+            autoreply_rules[str_gid] = {"enabled": False}
+        autoreply_rules[str_gid]["reply_text"] = reply_text
+        await save_autoreply_rules()
+        kb = get_autoreply_menu_keyboard(group_id)
+        await message.reply("回复内容已更新", reply_markup=kb)
+        await state.set_state(AdminStates.AutoreplyMenu)
+    except Exception as e:
+        await message.reply(f"处理失败：{str(e)}")
+
+# 编辑附加按钮（简单版：一行一个按钮文本）
+@router.callback_query(F.data.startswith("autoreply_buttons:"))
+async def start_edit_buttons(callback: CallbackQuery, state: FSMContext):
+    try:
+        group_id = int(callback.data.split(":", 1)[1])
+        await state.update_data(group_id=group_id)
+        str_gid = str(group_id)
+        current = autoreply_rules.get(str_gid, {}).get("buttons", [])
+        text = "当前按钮（一行一个文本）：\n" + "\n".join(current) if current else "暂无按钮"
+        text += "\n\n请输入新按钮列表（一行一个），或 /clear 清空："
+        await callback.message.edit_text(text, reply_markup=None)
+        await state.set_state(AdminStates.AutoreplyEditButtons)
+        await callback.answer()
+    except Exception as e:
+        await callback.answer(f"失败：{str(e)}", show_alert=True)
+
+@router.message(StateFilter(AdminStates.AutoreplyEditButtons))
+async def process_edit_buttons(message: Message, state: FSMContext):
+    try:
+        data = await state.get_data()
+        group_id = data.get('group_id')
+        str_gid = str(group_id)
+        text = message.text.strip()
+        if text == "/clear":
+            buttons = []
+        else:
+            buttons = [w.strip() for w in text.splitlines() if w.strip()]
+        if str_gid not in autoreply_rules:
+            autoreply_rules[str_gid] = {"enabled": False}
+        autoreply_rules[str_gid]["buttons"] = buttons
+        await save_autoreply_rules()
+        kb = get_autoreply_menu_keyboard(group_id)
+        await message.reply(f"按钮已更新（{len(buttons)} 个）", reply_markup=kb)
+        await state.set_state(AdminStates.AutoreplyMenu)
+    except Exception as e:
+        await message.reply(f"处理失败：{str(e)}")
+
+# 设置删除延时
+@router.callback_query(F.data.startswith("autoreply_delete:"))
+async def start_edit_delete(callback: CallbackQuery, state: FSMContext):
+    try:
+        group_id = int(callback.data.split(":", 1)[1])
+        await state.update_data(group_id=group_id)
+        str_gid = str(group_id)
+        rule = autoreply_rules.get(str_gid, {})
+        user_sec = rule.get("delete_user_sec", 0)
+        bot_sec = rule.get("delete_bot_sec", 0)
+        text = f"当前删除延时：\n用户消息：{user_sec}s（0=不删）\n机器人消息：{bot_sec}s（0=不删）\n\n请输入新延时（格式：用户秒 机器人秒，例如 3 5）："
+        await callback.message.edit_text(text, reply_markup=None)
+        await state.set_state(AdminStates.AutoreplyEditDelete)
+        await callback.answer()
+    except Exception as e:
+        await callback.answer(f"失败：{str(e)}", show_alert=True)
+
+@router.message(StateFilter(AdminStates.AutoreplyEditDelete))
+async def process_edit_delete(message: Message, state: FSMContext):
+    try:
+        data = await state.get_data()
+        group_id = data.get('group_id')
+        str_gid = str(group_id)
+        text = message.text.strip()
+        parts = text.split()
+        if len(parts) != 2:
+            await message.reply("格式错误，请输入两个数字：用户秒 机器人秒")
+            return
+        user_sec = int(parts[0])
+        bot_sec = int(parts[1])
+        if str_gid not in autoreply_rules:
+            autoreply_rules[str_gid] = {"enabled": False}
+        autoreply_rules[str_gid]["delete_user_sec"] = user_sec
+        autoreply_rules[str_gid]["delete_bot_sec"] = bot_sec
+        await save_autoreply_rules()
+        kb = get_autoreply_menu_keyboard(group_id)
+        await message.reply(f"删除延时已更新：用户 {user_sec}s，机器人 {bot_sec}s", reply_markup=kb)
+        await state.set_state(AdminStates.AutoreplyMenu)
+    except Exception as e:
+        await message.reply(f"处理失败：{str(e)}")
+        
+        
+# ==================== 原有群内功能（完整保留，你之前跑通的版本） ====================
 SHORT_MSG_THRESHOLD = 3
 MIN_CONSECUTIVE_COUNT = 2
 TIME_WINDOW_SECONDS = 60
@@ -894,11 +728,12 @@ async def cleanup_deleted_messages():
 
 # ==================== 启动 ====================
 async def main():
-    print("🚀 机器人启动成功（完整版，含退群自动拉黑）")
+    print("🚀 机器人启动成功（完整版，含自动回复规则）")
     await load_data()
     await load_all()
     asyncio.create_task(cleanup_deleted_messages())
     await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
 
 if __name__ == "__main__":
-    asyncio.run(main())        
+    asyncio.run(main())
+    
