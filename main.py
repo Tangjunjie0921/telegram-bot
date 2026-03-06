@@ -465,28 +465,21 @@ async def set_blacklist_duration(callback: CallbackQuery, state: FSMContext):
         await callback.answer(f"设置失败：{str(e)}", show_alert=True)
 
 # ==================== 监听退群自动拉黑 ====================
-@router.chat_member()
-async def on_chat_member_updated(update: ChatMemberUpdated):
+@router.message(F.chat.id.in_(GROUP_IDS), F.left_chat_member)
+async def on_left_chat_member(message: Message):
     try:
-        # 1. 快速过滤非目标事件
-        if update.new_chat_member.status not in (ChatMemberStatus.LEFT, ChatMemberStatus.KICKED):
+        if not message.left_chat_member:
             return
 
-        # 2. 防 bot 自己被踢
+        group_id = message.chat.id
+        user = message.left_chat_member
+        user_id = user.id
+
+        # 防 bot 自己退群
         me = await bot.get_me()
-        if update.new_chat_member.user.id == me.id:
+        if user_id == me.id:
             return
 
-        # 3. 只处理本 bot 监控的群
-        group_id = update.chat.id
-        if group_id not in GROUP_IDS:
-            return
-
-        user_id = update.new_chat_member.user.id
-        if not user_id:
-            return
-
-        # 4. 检查配置
         config = blacklist_config.get(str(group_id), {"enabled": False, "duration": 0})
         if not config["enabled"]:
             return
@@ -494,17 +487,15 @@ async def on_chat_member_updated(update: ChatMemberUpdated):
         duration = config["duration"]
         until_date = 0 if duration == 0 else int(time.time()) + duration
 
-        # 5. 执行拉黑
         await bot.ban_chat_member(
             chat_id=group_id,
             user_id=user_id,
             until_date=until_date
         )
 
-        print(f"退群自动拉黑成功：群 {group_id} 用户 {user_id} 时长 {'永久' if duration == 0 else duration//3600 + '小时'}")
-
+        print(f"退群自动拉黑成功：群 {group_id} 用户 {user_id} 时长 {'永久' if duration == 0 else f'{duration//3600}小时'}")
     except TelegramBadRequest as e:
-        print(f"拉黑失败（Telegram API 错误）：{e}")
+        print(f"拉黑失败（API 错误）：{e}")
     except Exception as e:
         print(f"拉黑未知错误：{e}")
         import traceback
