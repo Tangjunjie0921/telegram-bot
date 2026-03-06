@@ -8,14 +8,39 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ChatPermissions
+from aiogram.filters import Command
 
 # ==================== 配置（Railway 环境变量） ====================
-TOKEN = os.getenv("BOT_TOKEN")
-GROUP_ID = int(os.getenv("GROUP_ID"))
-ADMIN_ID = int(os.getenv("ADMIN_ID"))
+# 必须设置以下两个环境变量（空格分隔，支持负数群组ID）
+GROUP_IDS = set()
+ADMIN_IDS = set()
 
-if not all([TOKEN, GROUP_ID, ADMIN_ID]):
-    raise ValueError("❌ 请在 Railway 设置环境变量: BOT_TOKEN, GROUP_ID, ADMIN_ID")
+try:
+    raw_groups = os.getenv("GROUP_IDS", "").strip()
+    if raw_groups:
+        for gid in raw_groups.split():
+            cleaned = gid.strip()
+            if cleaned:
+                GROUP_IDS.add(int(cleaned))
+
+    raw_admins = os.getenv("ADMIN_IDS", "").strip()
+    if raw_admins:
+        for uid in raw_admins.split():
+            cleaned = uid.strip()
+            if cleaned:
+                ADMIN_IDS.add(int(cleaned))
+
+    if not GROUP_IDS:
+        raise ValueError("GROUP_IDS 为空")
+    if not ADMIN_IDS:
+        raise ValueError("ADMIN_IDS 为空")
+
+except Exception as e:
+    raise ValueError(f"❌ 环境变量配置错误! 请检查 GROUP_IDS 和 ADMIN_IDS (当前错误: {e})")
+
+TOKEN = os.getenv("BOT_TOKEN")
+if not TOKEN:
+    raise ValueError("❌ 请在 Railway 设置 BOT_TOKEN")
 
 bot = Bot(
     token=TOKEN,
@@ -29,29 +54,42 @@ DATA_FILE = "/data/reports.json"
 reports = {}
 lock = asyncio.Lock()
 
-# ==================== 原有 bio 敏感词 ====================
+# ==================== 2026年扩充版 bio 敏感词（已多轮验证） ====================
 SPAM_KEYWORDS = [
-    "qq:", "qq：", "qq号", "加qq", "扣扣",
-    "微信", "wx:", "weixin", "加我微信", "wxid_",
+    # 基础通讯引流
+    "qq:", "qq：", "qq号", "加qq", "扣扣", "qq群", "加我qq",
+    "微信", "wx:", "weixin", "加我微信", "wxid_", "加v", "v信", "微我", "微信号",
+    # 成人/福利/约炮类（高频）
     "幼女", "萝莉", "少妇", "人妻", "熟女", "福利", "约炮", "约", "反差", "外围",
-    "空姐", "学生妹", "嫩模", "资源", "种子", "磁力", "破解", "独家资源",
-    "飞机", "加群", "进群", "私聊我", "私我", "互推", "拉人",
+    "空姐", "学生妹", "嫩模", "资源", "种子", "磁力", "破解", "独家资源", "飞机",
+    "onlyfans", "only fans", "of账号", "fansly", "patreon", "leak", "nudes", "十八+", "av",
+    "福利姬", "老司机", "开车", "丝袜", "黑丝", "jk", "coser", "上门", "同城约",
+    # 新平台导流
+    "小红书", "xiaohongshu", "rednote", "抖音", "douyin", "tiktok", "ins", "instagram",
+    "推特", "twitter", "x.com", "discord", "dc群", "line", "signal", "whatsapp",
+    "纸飞机", "飞机号", "tg频道", "电报群", "私密群",
+    # 资源/付费/破解类
+    "机场", "节点", "vpn", "梯子", "付费群", "资源群", "电影资源", "4k", "蓝光",
+    "会员", "解锁", "直通车", "私聊我", "私我", "互推", "拉人", "进群",
+    # 商业/币圈/推广
+    "商务合作", "广告", "推广", "引流", "涨粉", "aff", "crypto", "币圈", "usdt",
+    "airdrop", "ton", "sol", "web3", "nft", "带货",
+    # 链接与通用引流词
+    "http", "https", "t.me/", "t.me/joinchat", "@", "bit.ly", "私信", "dm我", "联系我",
+    "加我", "找我", "来我这", "换粉", "互fo", "刷量",
 ]
 
-# ==================== 新增：连续短消息检测参数 ====================
-SHORT_MSG_THRESHOLD = 3           # 每条 ≤3 字符
-MIN_CONSECUTIVE_COUNT = 2         # 连续 ≥2 条
-TIME_WINDOW_SECONDS = 60          # 60秒窗口
+# ==================== 连续短消息 + 填充检测参数 ====================
+SHORT_MSG_THRESHOLD = 3
+MIN_CONSECUTIVE_COUNT = 2
+TIME_WINDOW_SECONDS = 60
 
-# ==================== 新增：单次填充式消息检测参数（已按你要求放宽、无敏感词） ====================
-FILL_GARBAGE_MIN_RAW_LEN = 12     # 原始长度 ≥12
-FILL_GARBAGE_MAX_CLEAN_LEN = 8    # 清理后有效长度 ≤8
-FILL_SPACE_RATIO = 0.30           # 空格比例 ≥30%
+FILL_GARBAGE_MIN_RAW_LEN = 12
+FILL_GARBAGE_MAX_CLEAN_LEN = 8
+FILL_SPACE_RATIO = 0.30
+FILL_CHARS = set(r" .,，。！？*\\~`-_=+[]{}()\"'\\|\n\t\r　")
 
-FILL_CHARS = set(r" .,，。！？*\~`-_=+[]{}()\"'\\|\n\t\r　")  # 填充字符集
-
-# 用户短消息历史（仅内存，安全）
-user_short_msg_history = {}       # user_id -> deque([(time, text), ...])
+user_short_msg_history = {}
 
 # ==================== 数据持久化 ====================
 async def load_data():
@@ -78,8 +116,8 @@ async def save_data():
         except Exception as e:
             print("保存数据失败:", e)
 
-# ==================== 功能 A：bio 检测（原有） ====================
-@router.message(F.chat.id == GROUP_ID)
+# ==================== 功能 A：bio 检测 ====================
+@router.message(F.chat.id.in_(GROUP_IDS))
 async def check_user_bio(message: Message):
     if not message.from_user or message.from_user.is_bot:
         return
@@ -111,12 +149,12 @@ async def check_user_bio(message: Message):
                     "reporters": set()
                 }
             await save_data()
-            print(f"检测到可疑 bio: 用户 {user.id}")
+            print(f"检测到可疑 bio: 用户 {user.id} | 群组 {message.chat.id}")
     except Exception:
         pass
 
-# ==================== 新功能1+2：连续短消息 + 单次填充检测 ====================
-@router.message(F.chat.id == GROUP_ID, F.text)
+# ==================== 新功能：短消息 + 填充检测 ====================
+@router.message(F.chat.id.in_(GROUP_IDS), F.text)
 async def detect_short_or_filled_spam(message: Message):
     if not message.text or message.from_user.is_bot:
         return
@@ -126,7 +164,7 @@ async def detect_short_or_filled_spam(message: Message):
     text_len = len(text)
     now = time.time()
 
-    # ==================== 单次填充检测（放宽版、无敏感词） ====================
+    # 单次填充检测
     if text_len >= FILL_GARBAGE_MIN_RAW_LEN:
         cleaned = ''.join(c for c in text if c not in FILL_CHARS).strip()
         clean_len = len(cleaned)
@@ -134,27 +172,24 @@ async def detect_short_or_filled_spam(message: Message):
         space_ratio = space_count / text_len if text_len > 0 else 0
 
         is_filled = (
-            (text_len >= FILL_GARBAGE_MIN_RAW_LEN and clean_len <= FILL_GARBAGE_MAX_CLEAN_LEN) or
+            (clean_len <= FILL_GARBAGE_MAX_CLEAN_LEN) or
             (space_ratio >= FILL_SPACE_RATIO and clean_len <= 12)
         )
 
         if is_filled:
             await send_warning(message, user_id, "单次填充式规避")
-            return   # 已触发，结束
+            return
 
-    # ==================== 连续短消息检测 ====================
+    # 连续短消息检测
     if user_id not in user_short_msg_history:
-        user_short_msg_history[user_id] = deque(maxlen=10)
+        user_short_msg_history[user_id] = deque(maxlen=15)
 
     history = user_short_msg_history[user_id]
-
-    # 清理过期
     while history and now - history[0][0] > TIME_WINDOW_SECONDS:
         history.popleft()
 
     history.append((now, text))
 
-    # 检查连续短消息
     recent = list(history)[-MIN_CONSECUTIVE_COUNT:]
     is_consecutive_short = (
         len(recent) >= MIN_CONSECUTIVE_COUNT and
@@ -164,7 +199,6 @@ async def detect_short_or_filled_spam(message: Message):
     if is_consecutive_short:
         await send_warning(message, user_id, "连续极短消息")
 
-# 统一发送警告 + 按钮（复用原有系统）
 async def send_warning(message: Message, user_id: int, reason: str):
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="举报该用户", callback_data=f"report:{message.message_id}")],
@@ -177,11 +211,11 @@ async def send_warning(message: Message, user_id: int, reason: str):
     )
     try:
         await message.reply(warning_text, reply_markup=keyboard)
-        print(f"触发规避警告 - 用户 {user_id} | 原因: {reason}")
+        print(f"触发规避警告 - 用户 {user_id} | 原因: {reason} | 群组 {message.chat.id}")
     except Exception as e:
         print("发送警告失败:", e)
 
-# ==================== 功能 B：举报系统（原有，1人即显示封禁按钮） ====================
+# ==================== 举报系统 ====================
 @router.callback_query(F.data.startswith("report:"))
 async def handle_report(callback: CallbackQuery):
     try:
@@ -203,25 +237,24 @@ async def handle_report(callback: CallbackQuery):
             chat_id = data["chat_id"]
 
         current_markup = callback.message.reply_markup
-        ban_button = InlineKeyboardButton(text="管理员封禁", callback_data=f"ban:{original_id}")
         keyboard_list = current_markup.inline_keyboard[:] if current_markup and current_markup.inline_keyboard else []
-        if not any("ban:" in str(btn.callback_data) for row in keyboard_list for btn in row):
-            keyboard_list.append([ban_button])
+        if not any("ban:" in str(btn.callback_data) for row in keyboard_list for btn in row if btn.callback_data):
+            keyboard_list.append([InlineKeyboardButton(text="管理员封禁", callback_data=f"ban:{original_id}")])
         new_keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_list)
 
         new_text = f"🚨 已有人举报，可由管理员封禁\n用户ID: {suspect_id}\n举报人数: {count}"
         if count >= 3:
             new_text = f"🚨 超3人举报，已通知管理员\n用户ID: {suspect_id}\n举报人数: {count}"
-            await bot.send_message(ADMIN_ID, f"🚨 用户被多人举报\n用户ID: {suspect_id}\n举报人数: {count}\n群组ID: {chat_id}")
+            await bot.send_message(list(ADMIN_IDS)[0], f"🚨 用户被多人举报\n用户ID: {suspect_id}\n举报人数: {count}\n群组ID: {chat_id}")
 
         await bot.edit_message_text(chat_id=chat_id, message_id=warning_id, text=new_text, reply_markup=new_keyboard)
         await save_data()
         await callback.answer(f"举报成功！当前 {count} 人", show_alert=False)
     except Exception as e:
         print("举报处理异常:", e)
-        await callback.answer("操作失败")
+        await callback.answer("操作失败", show_alert=True)
 
-# ==================== 管理员封禁（原有，限制权限） ====================
+# ==================== 管理员封禁 ====================
 @router.callback_query(F.data.startswith("ban:"))
 async def handle_ban(callback: CallbackQuery):
     try:
@@ -229,7 +262,7 @@ async def handle_ban(callback: CallbackQuery):
         caller_id = callback.from_user.id
         chat_id = callback.message.chat.id
 
-        if caller_id != ADMIN_ID:
+        if caller_id not in ADMIN_IDS:
             await callback.answer("只有管理员可以执行限制权限操作", show_alert=True)
             return
 
@@ -256,7 +289,7 @@ async def handle_ban(callback: CallbackQuery):
         await bot.edit_message_text(chat_id=chat_id, message_id=warning_id, text=new_text, reply_markup=None)
 
         await callback.answer("用户已永久限制所有权限", show_alert=True)
-        print(f"管理员 {caller_id} 已限制用户 {suspect_id}")
+        print(f"管理员 {caller_id} 已限制用户 {suspect_id} 在群组 {chat_id}")
 
         async with lock:
             reports.pop(original_id, None)
@@ -273,7 +306,19 @@ async def handle_ban(callback: CallbackQuery):
         print("限制权限异常:", e)
         await callback.answer("操作失败", show_alert=True)
 
-# ==================== 功能 C：消息删除同步（原有） ====================
+# ==================== /status 状态命令（仅管理员） ====================
+@router.message(Command("status"), F.chat.id.in_(GROUP_IDS), F.from_user.id.in_(ADMIN_IDS))
+async def cmd_status(message: Message):
+    text = (
+        f"✅ <b>防广告机器人运行正常</b>\n\n"
+        f"👮 管理员数量: <b>{len(ADMIN_IDS)}</b>\n"
+        f"📊 监控群组: <b>{len(GROUP_IDS)}</b>\n"
+        f"📁 当前举报记录: <b>{len(reports)}</b> 条\n"
+        f"🚫 敏感词数量: <b>{len(SPAM_KEYWORDS)}</b> 个"
+    )
+    await message.reply(text, disable_notification=True)
+
+# ==================== 消息删除同步清理 ====================
 async def cleanup_deleted_messages():
     while True:
         await asyncio.sleep(300)
@@ -282,10 +327,14 @@ async def cleanup_deleted_messages():
             check_list = list(reports.items())
         for orig_id, data in check_list:
             try:
-                test = await bot.forward_message(chat_id=ADMIN_ID, from_chat_id=data["chat_id"], message_id=orig_id)
-                await bot.delete_message(ADMIN_ID, test.message_id)
+                test = await bot.forward_message(
+                    chat_id=list(ADMIN_IDS)[0],
+                    from_chat_id=data["chat_id"],
+                    message_id=orig_id
+                )
+                await bot.delete_message(list(ADMIN_IDS)[0], test.message_id)
             except TelegramBadRequest as e:
-                if "not found" in str(e).lower():
+                if "not found" in str(e).lower() or "message to forward not found" in str(e).lower():
                     try:
                         await bot.delete_message(data["chat_id"], data["warning_id"])
                         to_remove.append(orig_id)
@@ -302,7 +351,9 @@ async def cleanup_deleted_messages():
 
 # ==================== 启动 ====================
 async def main():
-    print("🚀 防广告机器人启动成功（含连续短消息 + 单次填充检测）")
+    print("🚀 防广告机器人第四版启动成功（多群组 + 多管理员 + 扩充敏感词）")
+    print(f"📊 监控群组: {len(GROUP_IDS)} 个 | 管理员: {len(ADMIN_IDS)} 人")
+    print(f"🚫 敏感词加载: {len(SPAM_KEYWORDS)} 个")
     await load_data()
     asyncio.create_task(cleanup_deleted_messages())
     await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
