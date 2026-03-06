@@ -8,8 +8,11 @@ from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ChatPermissions
-from aiogram.filters import Command
+from aiogram.types import (
+    Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
+    ChatPermissions, ReplyKeyboardRemove
+)
+from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -33,129 +36,20 @@ if not TOKEN:
     raise ValueError("❌ 请设置 BOT_TOKEN")
 
 bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-dp = Dispatcher(storage=MemoryStorage())  # 显式使用 MemoryStorage
+storage = MemoryStorage()
+dp = Dispatcher(storage=storage)
 router = Router()
 dp.include_router(router)
 
 DATA_FILE = "/data/reports.json"
 BIO_KEYWORDS_FILE = "/data/bio_keywords.json"
-SCHEDULES_FILE = "/data/schedules.json"
 reports = {}
 lock = asyncio.Lock()
-exempt_users = {}  # user_id → profile_hash
-schedules = []  # 定时任务列表
 
-# ==================== 状态机定义 ====================
-class ScheduleStates(StatesGroup):
-    SELECT_GROUP = State()
-    SELECT_TYPE = State()
-    SELECT_INTERVAL = State()
-    SELECT_DELAY = State()
-    SELECT_CONTENT_TYPE = State()
-    INPUT_TEXT = State()
-    INPUT_MEDIA = State()
-    ADD_BUTTON1_TEXT = State()
-    ADD_BUTTON1_URL = State()
-    ADD_BUTTON2_TEXT = State()
-    ADD_BUTTON2_URL = State()
-    CONFIRM = State()
+# 豁免列表：user_id → profile_hash (bio|full_name|username)
+exempt_users = {}  # 内存存储，重启丢失可接受
 
-# ==================== 加载/保存定时任务 ====================
-async def load_schedules():
-    global schedules
-    try:
-        os.makedirs(os.path.dirname(SCHEDULES_FILE), exist_ok=True)
-        if os.path.exists(SCHEDULES_FILE):
-            with open(SCHEDULES_FILE, "r", encoding="utf-8") as f:
-                schedules = json.load(f)
-            print(f"✅ 加载 {len(schedules)} 个定时任务成功")
-        else:
-            schedules = []
-            print("定时任务文件不存在，初始化为空")
-    except Exception as e:
-        print("加载定时任务失败:", e)
-        schedules = []
-
-async def save_schedules():
-    async with lock:
-        try:
-            with open(SCHEDULES_FILE, "w", encoding="utf-8") as f:
-                json.dump(schedules, f, ensure_ascii=False, indent=2)
-            print("定时任务已保存")
-        except Exception as e:
-            print("保存定时任务失败:", e)
-
-# ==================== 定时发送循环（事件驱动） ====================
-async def scheduler_loop():
-    print("定时任务循环已启动")
-    while True:
-        now = time.time()
-        to_send = [t for t in schedules if t["next_send_timestamp"] <= now]
-
-        for task in to_send:
-            try:
-                keyboard = None
-                if task.get("buttons"):
-                    rows = []
-                    for b in task["buttons"]:
-                        rows.append([InlineKeyboardButton(text=b["text"], url=b["url"])])
-                    keyboard = InlineKeyboardMarkup(inline_keyboard=rows)
-
-                if task.get("media_type"):
-                    if task["media_type"] == "photo":
-                        await bot.send_photo(
-                            chat_id=task["chat_id"],
-                            photo=task["media_file_id"],
-                            caption=task["text"],
-                            reply_markup=keyboard
-                        )
-                    elif task["media_type"] == "video":
-                        await bot.send_video(
-                            chat_id=task["chat_id"],
-                            video=task["media_file_id"],
-                            caption=task["text"],
-                            reply_markup=keyboard
-                        )
-                    elif task["media_type"] == "document":
-                        await bot.send_document(
-                            chat_id=task["chat_id"],
-                            document=task["media_file_id"],
-                            caption=task["text"],
-                            reply_markup=keyboard
-                        )
-                else:
-                    await bot.send_message(
-                        chat_id=task["chat_id"],
-                        text=task["text"],
-                        reply_markup=keyboard,
-                        disable_web_page_preview=False
-                    )
-
-                print(f"定时发送成功: 任务 #{task['task_id']} 到群 {task['chat_id']}")
-            except TelegramBadRequest as e:
-                print(f"定时发送失败 #{task['task_id']} (TelegramBadRequest): {e}")
-            except Exception as e:
-                print(f"定时发送异常 #{task['task_id']}: {e}")
-
-            # 更新或移除任务
-            if task["interval_minutes"] > 0:
-                task["next_send_timestamp"] += task["interval_minutes"] * 60
-            else:
-                schedules.remove(task)  # 一次性删除
-
-        if to_send:
-            await save_schedules()
-
-        # 计算下次唤醒时间
-        if schedules:
-            next_time = min(t["next_send_timestamp"] for t in schedules)
-            sleep_sec = max(1, next_time - time.time())
-        else:
-            sleep_sec = 3600  # 无任务睡1小时
-
-        await asyncio.sleep(sleep_sec)
-
-# ==================== bio 关键词加载（不变） ====================
+# ==================== bio 专用关键词 ====================
 async def load_bio_keywords():
     try:
         os.makedirs(os.path.dirname(BIO_KEYWORDS_FILE), exist_ok=True)
@@ -172,6 +66,7 @@ async def load_bio_keywords():
 
 BIO_KEYWORDS = []
 
+# 显示名称专用关键词（独立，暂不持久化，如需可加文件）
 DISPLAY_NAME_KEYWORDS = [
     "加v", "加微信", "加qq", "加扣", "福利加", "约", "约炮", "资源私聊", "私我", "私聊我",
     "飞机", "纸飞机", "福利", "外围", "反差", "嫩模", "学生妹", "空姐", "人妻", "熟女",
@@ -184,35 +79,403 @@ async def load_all():
     print(f"🚀 bio 关键词加载完成: {len(BIO_KEYWORDS)} 个")
     print(f"显示名称专用关键词: {len(DISPLAY_NAME_KEYWORDS)} 个")
 
-# ==================== 数据持久化（不变） ====================
-async def load_data():
-    global reports
+# ==================== FSM States ====================
+class AdminStates(StatesGroup):
+    ChoosingGroup = State()
+    InGroupMenu = State()
+    AddingBioKw = State()
+    DeletingBioKw = State()
+    AddingDispKw = State()
+    DeletingDispKw = State()
+
+# ==================== 工具函数 ====================
+def get_group_button_text(chat_id: int) -> str:
+    return f"群 {chat_id}"
+
+def get_group_selection_keyboard():
+    buttons = []
+    row = []
+    for gid in sorted(GROUP_IDS):
+        row.append(InlineKeyboardButton(text=get_group_button_text(gid), callback_data=f"group:{gid}"))
+        if len(row) == 2:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+    buttons.append([InlineKeyboardButton(text="← 返回", callback_data="back_to_main")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+def get_group_menu_keyboard(group_id: int):
+    buttons = [
+        [InlineKeyboardButton(text="添加简介敏感词", callback_data=f"add_bio:{group_id}")],
+        [InlineKeyboardButton(text="删除简介敏感词", callback_data=f"del_bio:{group_id}")],
+        [InlineKeyboardButton(text="查看简介敏感词", callback_data=f"list_bio:{group_id}")],
+        [InlineKeyboardButton(text="添加显示名敏感词", callback_data=f"add_disp:{group_id}")],
+        [InlineKeyboardButton(text="删除显示名敏感词", callback_data=f"del_disp:{group_id}")],
+        [InlineKeyboardButton(text="查看显示名敏感词", callback_data=f"list_disp:{group_id}")],
+        [InlineKeyboardButton(text="← 返回群组选择", callback_data="back_to_groups")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+def get_confirm_keyboard(action: str):
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ 确认", callback_data=f"confirm:{action}"),
+        InlineKeyboardButton(text="❌ 取消", callback_data="cancel"),
+    ]])
+
+# ==================== 主入口：/admin ====================
+@router.message(Command("admin"), F.chat.type == "private", F.from_user.id.in_(ADMIN_IDS))
+async def cmd_admin(message: Message, state: FSMContext):
     try:
-        os.makedirs(os.path.dirname(DATA_FILE), exist_ok=True)
-        if os.path.exists(DATA_FILE):
-            with open(DATA_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                for k, v in data.items():
-                    v["reporters"] = set(v.get("reporters", []))
-                    reports[int(k)] = v
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="管理群组设置", callback_data="select_group")
+        ]])
+        await message.reply(
+            "👑 管理员控制面板\n请选择操作：",
+            reply_markup=keyboard
+        )
+        await state.clear()
     except Exception as e:
-        print("数据加载失败（首次正常）:", e)
+        await message.reply(f"打开面板失败：{str(e)}")
+        print(f"admin panel error: {e}")
 
-async def save_data():
-    async with lock:
-        try:
-            data_to_save = {str(k): {**v, "reporters": list(v["reporters"])} for k, v in reports.items()}
-            with open(DATA_FILE, "w", encoding="utf-8") as f:
-                json.dump(data_to_save, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            print("保存失败:", e)
+# ==================== 群组选择 & 子菜单导航 ====================
+@router.callback_query(F.data == "select_group")
+async def select_group(callback: CallbackQuery, state: FSMContext):
+    try:
+        if not GROUP_IDS:
+            await callback.message.edit_text("当前没有任何监控群组", reply_markup=None)
+            return
+        keyboard = get_group_selection_keyboard()
+        await callback.message.edit_text("请选择要管理的群组：", reply_markup=keyboard)
+        await state.set_state(AdminStates.ChoosingGroup)
+        await callback.answer()
+    except Exception as e:
+        await callback.answer(f"选择群组失败：{str(e)}", show_alert=True)
+        print(f"select_group error: {e}")
 
-# ==================== profile hash（不变） ====================
-def get_profile_hash(bio: str, full_name: str, username: str | None) -> str:
-    profile_str = f"{bio}|{full_name}|{username or ''}"
-    return hashlib.sha256(profile_str.encode('utf-8')).hexdigest()
+@router.callback_query(F.data.startswith("group:"))
+async def enter_group_menu(callback: CallbackQuery, state: FSMContext):
+    try:
+        group_id = int(callback.data.split(":", 1)[1])
+        if group_id not in GROUP_IDS:
+            await callback.answer("无效群组", show_alert=True)
+            return
+        await state.update_data(selected_group=group_id)
+        keyboard = get_group_menu_keyboard(group_id)
+        await callback.message.edit_text(
+            f"正在管理群组 {group_id}\n请选择功能：",
+            reply_markup=keyboard
+        )
+        await state.set_state(AdminStates.InGroupMenu)
+        await callback.answer()
+    except ValueError:
+        await callback.answer("群组ID格式错误", show_alert=True)
+    except Exception as e:
+        await callback.answer(f"进入群菜单失败：{str(e)}", show_alert=True)
+        print(f"enter_group_menu error: {e}")
 
-# ==================== 用户信息检测（不变） ====================
+@router.callback_query(F.data == "back_to_groups")
+async def back_to_groups(callback: CallbackQuery, state: FSMContext):
+    try:
+        keyboard = get_group_selection_keyboard()
+        await callback.message.edit_text("请选择要管理的群组：", reply_markup=keyboard)
+        await state.set_state(AdminStates.ChoosingGroup)
+        await callback.answer()
+    except Exception as e:
+        await callback.answer(f"返回失败：{str(e)}", show_alert=True)
+
+@router.callback_query(F.data == "back_to_main")
+async def back_to_main(callback: CallbackQuery, state: FSMContext):
+    try:
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="管理群组设置", callback_data="select_group")
+        ]])
+        await callback.message.edit_text("👑 管理员控制面板\n请选择操作：", reply_markup=keyboard)
+        await state.clear()
+        await callback.answer()
+    except Exception as e:
+        await callback.answer(f"返回主菜单失败：{str(e)}", show_alert=True)
+
+# ==================== 添加 / 删除 简介关键词 ====================
+@router.callback_query(F.data.startswith("add_bio:"))
+async def start_add_bio_kw(callback: CallbackQuery, state: FSMContext):
+    try:
+        group_id = int(callback.data.split(":", 1)[1])
+        await state.update_data(action="add_bio", group_id=group_id)
+        await callback.message.edit_text(
+            "请输入要**添加**的简介敏感词（一行一个，可多行）：",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        await state.set_state(AdminStates.AddingBioKw)
+        await callback.answer()
+    except Exception as e:
+        await callback.answer(f"操作失败：{str(e)}", show_alert=True)
+
+@router.message(StateFilter(AdminStates.AddingBioKw))
+async def process_add_bio_kw(message: Message, state: FSMContext):
+    try:
+        data = await state.get_data()
+        words = [w.strip().lower() for w in message.text.splitlines() if w.strip()]
+        if not words:
+            await message.reply("没有输入有效关键词，请重新输入。")
+            return
+
+        text = "即将添加以下简介关键词：\n" + "\n".join(f"• {w}" for w in words)
+        await message.reply(
+            text,
+            reply_markup=get_confirm_keyboard("add_bio")
+        )
+        await state.update_data(words=words)
+    except Exception as e:
+        await message.reply(f"处理输入失败：{str(e)}")
+        print(f"process_add_bio_kw error: {e}")
+
+@router.callback_query(F.data == "confirm:add_bio")
+async def confirm_add_bio(callback: CallbackQuery, state: FSMContext):
+    try:
+        data = await state.get_data()
+        words = data.get("words", [])
+        if not words:
+            await callback.answer("无内容可添加", show_alert=True)
+            return
+
+        async with lock:
+            added = []
+            for w in words:
+                if w not in BIO_KEYWORDS:
+                    BIO_KEYWORDS.append(w)
+                    added.append(w)
+            if added:
+                with open(BIO_KEYWORDS_FILE, "w", encoding="utf-8") as f:
+                    json.dump(BIO_KEYWORDS, f, ensure_ascii=False, indent=2)
+
+        msg = f"✅ 已添加 {len(added)} 个简介关键词（当前总数：{len(BIO_KEYWORDS)}）"
+        await callback.message.edit_text(msg, reply_markup=None)
+        await state.clear()
+        await callback.answer("添加成功")
+    except Exception as e:
+        await callback.message.edit_text(f"添加失败：{str(e)}")
+        print(f"confirm_add_bio error: {e}")
+
+@router.callback_query(F.data.startswith("del_bio:"))
+async def start_del_bio_kw(callback: CallbackQuery, state: FSMContext):
+    try:
+        group_id = int(callback.data.split(":", 1)[1])
+        await state.update_data(action="del_bio", group_id=group_id)
+        await callback.message.edit_text(
+            "请输入要**删除**的简介敏感词（一行一个，可多行）：",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        await state.set_state(AdminStates.DeletingBioKw)
+        await callback.answer()
+    except Exception as e:
+        await callback.answer(f"操作失败：{str(e)}", show_alert=True)
+
+@router.message(StateFilter(AdminStates.DeletingBioKw))
+async def process_del_bio_kw(message: Message, state: FSMContext):
+    try:
+        data = await state.get_data()
+        words = [w.strip().lower() for w in message.text.splitlines() if w.strip()]
+        if not words:
+            await message.reply("没有输入有效关键词，请重新输入。")
+            return
+
+        text = "即将删除以下简介关键词：\n" + "\n".join(f"• {w}" for w in words)
+        await message.reply(
+            text,
+            reply_markup=get_confirm_keyboard("del_bio")
+        )
+        await state.update_data(words=words)
+    except Exception as e:
+        await message.reply(f"处理输入失败：{str(e)}")
+        print(f"process_del_bio_kw error: {e}")
+
+@router.callback_query(F.data == "confirm:del_bio")
+async def confirm_del_bio(callback: CallbackQuery, state: FSMContext):
+    try:
+        data = await state.get_data()
+        words = data.get("words", [])
+        if not words:
+            await callback.answer("无内容可删除", show_alert=True)
+            return
+
+        async with lock:
+            removed = []
+            for w in words:
+                if w in BIO_KEYWORDS:
+                    BIO_KEYWORDS.remove(w)
+                    removed.append(w)
+            if removed:
+                with open(BIO_KEYWORDS_FILE, "w", encoding="utf-8") as f:
+                    json.dump(BIO_KEYWORDS, f, ensure_ascii=False, indent=2)
+
+        msg = f"✅ 已删除 {len(removed)} 个简介关键词（当前总数：{len(BIO_KEYWORDS)}）"
+        await callback.message.edit_text(msg, reply_markup=None)
+        await state.clear()
+        await callback.answer("删除成功")
+    except Exception as e:
+        await callback.message.edit_text(f"删除失败：{str(e)}")
+        print(f"confirm_del_bio error: {e}")
+
+@router.callback_query(F.data.startswith("list_bio:"))
+async def list_bio_keywords(callback: CallbackQuery):
+    try:
+        async with lock:
+            if not BIO_KEYWORDS:
+                text = "当前没有任何简介敏感词"
+            else:
+                text = f"📋 当前简介敏感词（{len(BIO_KEYWORDS)} 个）:\n" + "\n".join(f"• {w}" for w in sorted(BIO_KEYWORDS))
+        await callback.message.edit_text(text[:4000], reply_markup=None)
+        await callback.answer()
+    except Exception as e:
+        await callback.message.edit_text(f"获取列表失败：{str(e)}")
+        print(f"list_bio error: {e}")
+
+# ==================== 显示名称关键词 ====================
+@router.callback_query(F.data.startswith("add_disp:"))
+async def start_add_disp_kw(callback: CallbackQuery, state: FSMContext):
+    try:
+        group_id = int(callback.data.split(":", 1)[1])
+        await state.update_data(action="add_disp", group_id=group_id)
+        await callback.message.edit_text(
+            "请输入要**添加**的显示名称敏感词（一行一个，可多行）：",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        await state.set_state(AdminStates.AddingDispKw)
+        await callback.answer()
+    except Exception as e:
+        await callback.answer(f"操作失败：{str(e)}", show_alert=True)
+
+@router.message(StateFilter(AdminStates.AddingDispKw))
+async def process_add_disp_kw(message: Message, state: FSMContext):
+    try:
+        data = await state.get_data()
+        words = [w.strip().lower() for w in message.text.splitlines() if w.strip()]
+        if not words:
+            await message.reply("没有输入有效关键词，请重新输入。")
+            return
+
+        text = "即将添加以下显示名称关键词：\n" + "\n".join(f"• {w}" for w in words)
+        await message.reply(
+            text,
+            reply_markup=get_confirm_keyboard("add_disp")
+        )
+        await state.update_data(words=words)
+    except Exception as e:
+        await message.reply(f"处理输入失败：{str(e)}")
+        print(f"process_add_disp_kw error: {e}")
+
+@router.callback_query(F.data == "confirm:add_disp")
+async def confirm_add_disp(callback: CallbackQuery, state: FSMContext):
+    try:
+        data = await state.get_data()
+        words = data.get("words", [])
+        if not words:
+            await callback.answer("无内容可添加", show_alert=True)
+            return
+
+        async with lock:
+            added = []
+            for w in words:
+                if w not in DISPLAY_NAME_KEYWORDS:
+                    DISPLAY_NAME_KEYWORDS.append(w)
+                    added.append(w)
+
+        msg = f"✅ 已添加 {len(added)} 个显示名称关键词（当前总数：{len(DISPLAY_NAME_KEYWORDS)}）"
+        await callback.message.edit_text(msg, reply_markup=None)
+        await state.clear()
+        await callback.answer("添加成功")
+    except Exception as e:
+        await callback.message.edit_text(f"添加失败：{str(e)}")
+        print(f"confirm_add_disp error: {e}")
+
+@router.callback_query(F.data.startswith("del_disp:"))
+async def start_del_disp_kw(callback: CallbackQuery, state: FSMContext):
+    try:
+        group_id = int(callback.data.split(":", 1)[1])
+        await state.update_data(action="del_disp", group_id=group_id)
+        await callback.message.edit_text(
+            "请输入要**删除**的显示名称敏感词（一行一个，可多行）：",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        await state.set_state(AdminStates.DeletingDispKw)
+        await callback.answer()
+    except Exception as e:
+        await callback.answer(f"操作失败：{str(e)}", show_alert=True)
+
+@router.message(StateFilter(AdminStates.DeletingDispKw))
+async def process_del_disp_kw(message: Message, state: FSMContext):
+    try:
+        data = await state.get_data()
+        words = [w.strip().lower() for w in message.text.splitlines() if w.strip()]
+        if not words:
+            await message.reply("没有输入有效关键词，请重新输入。")
+            return
+
+        text = "即将删除以下显示名称关键词：\n" + "\n".join(f"• {w}" for w in words)
+        await message.reply(
+            text,
+            reply_markup=get_confirm_keyboard("del_disp")
+        )
+        await state.update_data(words=words)
+    except Exception as e:
+        await message.reply(f"处理输入失败：{str(e)}")
+        print(f"process_del_disp_kw error: {e}")
+
+@router.callback_query(F.data == "confirm:del_disp")
+async def confirm_del_disp(callback: CallbackQuery, state: FSMContext):
+    try:
+        data = await state.get_data()
+        words = data.get("words", [])
+        if not words:
+            await callback.answer("无内容可删除", show_alert=True)
+            return
+
+        async with lock:
+            removed = []
+            for w in words:
+                if w in DISPLAY_NAME_KEYWORDS:
+                    DISPLAY_NAME_KEYWORDS.remove(w)
+                    removed.append(w)
+
+        msg = f"✅ 已删除 {len(removed)} 个显示名称关键词（当前总数：{len(DISPLAY_NAME_KEYWORDS)}）"
+        await callback.message.edit_text(msg, reply_markup=None)
+        await state.clear()
+        await callback.answer("删除成功")
+    except Exception as e:
+        await callback.message.edit_text(f"删除失败：{str(e)}")
+        print(f"confirm_del_disp error: {e}")
+
+@router.callback_query(F.data.startswith("list_disp:"))
+async def list_disp_keywords(callback: CallbackQuery):
+    try:
+        async with lock:
+            if not DISPLAY_NAME_KEYWORDS:
+                text = "当前没有任何显示名称敏感词"
+            else:
+                text = f"📋 当前显示名称敏感词（{len(DISPLAY_NAME_KEYWORDS)} 个）:\n" + "\n".join(f"• {w}" for w in sorted(DISPLAY_NAME_KEYWORDS))
+        await callback.message.edit_text(text[:4000], reply_markup=None)
+        await callback.answer()
+    except Exception as e:
+        await callback.message.edit_text(f"获取列表失败：{str(e)}")
+        print(f"list_disp error: {e}")
+
+# ==================== 取消按钮通用处理 ====================
+@router.callback_query(F.data == "cancel")
+async def cancel_action(callback: CallbackQuery, state: FSMContext):
+    try:
+        await state.clear()
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="管理群组设置", callback_data="select_group")
+        ]])
+        await callback.message.edit_text("操作已取消。\n返回主面板：", reply_markup=keyboard)
+        await callback.answer("已取消")
+    except Exception as e:
+        await callback.answer(f"取消失败：{str(e)}", show_alert=True)
+
+# ==================== 第11版原有功能（完整保留，未改动） ====================
+
 @router.message(F.chat.id.in_(GROUP_IDS))
 async def check_user_info(message: Message):
     if not message.from_user or message.from_user.is_bot:
@@ -221,6 +484,7 @@ async def check_user_info(message: Message):
     user = message.from_user
     user_id = user.id
 
+    # 先检查豁免
     async with lock:
         if user_id in exempt_users:
             current_hash = get_profile_hash(
@@ -229,29 +493,42 @@ async def check_user_info(message: Message):
                 user.username or ""
             )
             if current_hash == exempt_users[user_id]:
+                print(f"用户 {user_id} 在豁免中，跳过检测")
                 return
             else:
+                # 资料变了，解除豁免
                 exempt_users.pop(user_id, None)
+                print(f"用户 {user_id} 资料变更，解除豁免")
 
     try:
         chat_info = await bot.get_chat(user_id)
         bio = (chat_info.bio or "").lower()
 
+        # 1. bio 检查（优先）
         has_link_in_bio = any(x in bio for x in ["http://", "https://", "t.me/", "@"])
         has_spam_in_bio = any(kw.lower() in bio for kw in BIO_KEYWORDS)
         bio_trigger = has_link_in_bio or has_spam_in_bio
 
+        # 2. 显示名称检查
         display_name = (user.full_name or "").lower()
         has_spam_in_display = any(kw.lower() in display_name for kw in DISPLAY_NAME_KEYWORDS)
 
         if bio_trigger or has_spam_in_display:
             reason_parts = []
-            if has_link_in_bio: reason_parts.append("简介含链接")
-            if has_spam_in_bio: reason_parts.append("简介含敏感词")
-            if has_spam_in_display: reason_parts.append("显示名称含敏感词，疑似用于引流")
+            if has_link_in_bio:
+                reason_parts.append("简介含链接")
+            if has_spam_in_bio:
+                reason_parts.append("简介含敏感词")
+            if has_spam_in_display:
+                reason_parts.append("显示名称含敏感词，疑似用于引流")
 
             reason_text = " + ".join(reason_parts)
-            warning_text = f"⚠️ 检测到疑似广告引流规避（{reason_text}）\n用户ID: {user.id}\n显示名称: {user.full_name}\n举报数: 0"
+            warning_text = (
+                f"⚠️ 检测到疑似广告引流规避（{reason_text}）\n"
+                f"用户ID: {user.id}\n"
+                f"显示名称: {user.full_name}\n"
+                f"举报数: 0"
+            )
 
             keyboard = InlineKeyboardMarkup(inline_keyboard=[[
                 InlineKeyboardButton(text="举报该用户", callback_data=f"report:{message.message_id}"),
@@ -266,14 +543,15 @@ async def check_user_info(message: Message):
                     "chat_id": message.chat.id,
                     "reporters": set(),
                     "original_text": warning_text,
-                    "original_message_id": message.message_id
+                    "original_message_id": message.message_id  # 用于后续删除用户原消息
                 }
             await save_data()
             print(f"触发检测: {user.id} | 原因: {reason_text}")
+
     except Exception as e:
         print("用户信息检测异常:", e)
 
-# ==================== 误判/豁免 处理（不变） ====================
+# ==================== 误判/豁免 处理 ====================
 @router.callback_query(F.data.startswith("exempt:"))
 async def handle_exempt(callback: CallbackQuery):
     try:
@@ -293,28 +571,33 @@ async def handle_exempt(callback: CallbackQuery):
             suspect_id = data["suspect_id"]
             warning_id = data["warning_id"]
 
-        suspect_user = await bot.get_chat(suspect_id)
-        bio = (await bot.get_chat(suspect_id)).bio or ""
-        full_name = f"{suspect_user.first_name} {suspect_user.last_name or ''}"
-        username = suspect_user.username
+        # 获取当前 profile hash 并豁免
+        chat_info = await bot.get_chat(suspect_id)
+        bio = (chat_info.bio or "")
+        full_name = chat_info.first_name + " " + (chat_info.last_name or "")
+        username = chat_info.username
         profile_hash = get_profile_hash(bio, full_name, username)
 
         async with lock:
             exempt_users[suspect_id] = profile_hash
+            # 删除警告消息
             await bot.delete_message(chat_id, warning_id)
 
         await callback.answer("已豁免此人 👮‍♂️\n后续资料不变将不再检测", show_alert=True)
+        print(f"管理员 {caller_id} 豁免用户 {suspect_id}")
 
+        # 从 reports 移除（可选，节省内存）
         async with lock:
             reports.pop(original_id, None)
         await save_data()
+
     except TelegramBadRequest as e:
         await callback.answer(f"操作失败: {str(e)}", show_alert=True)
     except Exception as e:
         print("豁免异常:", e)
         await callback.answer("操作失败", show_alert=True)
 
-# ==================== 短消息 + 填充检测（不变） ====================
+# ==================== 短消息 + 填充检测（加豁免检查） ====================
 @router.message(F.chat.id.in_(GROUP_IDS), F.text)
 async def detect_short_or_filled_spam(message: Message):
     if not message.from_user or message.from_user.is_bot:
@@ -322,18 +605,21 @@ async def detect_short_or_filled_spam(message: Message):
 
     user_id = message.from_user.id
 
+    # 检查豁免
     async with lock:
         if user_id in exempt_users:
+            # 重新计算当前 hash
             chat_info = await bot.get_chat(user_id)
             bio = (chat_info.bio or "")
             full_name = message.from_user.full_name or ""
             username = message.from_user.username
             current_hash = get_profile_hash(bio, full_name, username)
             if current_hash == exempt_users[user_id]:
-                return
+                return  # 豁免中，跳过
             else:
-                exempt_users.pop(user_id, None)
+                exempt_users.pop(user_id, None)  # 资料变了，解除
 
+    # 原有逻辑...
     text = message.text
     text_len = len(text)
     now = time.time()
@@ -360,7 +646,7 @@ async def detect_short_or_filled_spam(message: Message):
     if reason:
         await send_warning(message, user_id, reason)
 
-# ==================== 发送警告（不变） ====================
+# ==================== 发送警告（新增误判按钮） ====================
 async def send_warning(message: Message, user_id: int, reason: str):
     warning_text = f"⚠️ 检测到疑似广告引流规避（{reason}）\n用户ID: {user_id}\n举报数: 0"
     keyboard = InlineKeyboardMarkup(inline_keyboard=[[
@@ -427,7 +713,7 @@ async def handle_report(callback: CallbackQuery):
         print("举报处理异常:", e)
         await callback.answer("操作失败", show_alert=True)
 
-# ==================== 封禁 + 10秒删除（不变） ====================
+# ==================== 管理员封禁 + 10秒后删除消息 ====================
 @router.callback_query(F.data.startswith(("ban24h:", "banperm:")))
 async def handle_ban(callback: CallbackQuery):
     try:
@@ -482,6 +768,7 @@ async def handle_ban(callback: CallbackQuery):
         await callback.answer(f"已{ban_type}", show_alert=True)
         print(f"管理员 {caller_id} 对 {suspect_id} 执行 {ban_type} 在群 {chat_id}")
 
+        # 异步 10 秒后删除消息
         async def delayed_delete():
             await asyncio.sleep(10)
             try:
@@ -513,7 +800,7 @@ async def handle_ban(callback: CallbackQuery):
         print("封禁异常:", e)
         await callback.answer("操作失败", show_alert=True)
 
-# ==================== /status（不变） ====================
+# ==================== /status 命令（新增豁免统计） ====================
 @router.message(Command("status"), F.chat.id.in_(GROUP_IDS), F.from_user.id.in_(ADMIN_IDS))
 async def cmd_status(message: Message):
     async with lock:
@@ -529,7 +816,7 @@ async def cmd_status(message: Message):
     )
     await message.reply(text, disable_notification=True)
 
-# ==================== 自动清理（不变） ====================
+# ==================== 自动清理 ====================
 async def cleanup_deleted_messages():
     while True:
         await asyncio.sleep(300)
@@ -559,13 +846,50 @@ async def cleanup_deleted_messages():
             await save_data()
         await asyncio.sleep(1)
 
+# ==================== 数据持久化 ====================
+async def load_data():
+    global reports
+    try:
+        os.makedirs(os.path.dirname(DATA_FILE), exist_ok=True)
+        if os.path.exists(DATA_FILE):
+            with open(DATA_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                for k, v in data.items():
+                    v["reporters"] = set(v.get("reporters", []))
+                    reports[int(k)] = v
+    except Exception as e:
+        print("数据加载失败（首次正常）:", e)
+
+async def save_data():
+    async with lock:
+        try:
+            data_to_save = {str(k): {**v, "reporters": list(v["reporters"])} for k, v in reports.items()}
+            with open(DATA_FILE, "w", encoding="utf-8") as f:
+                json.dump(data_to_save, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print("保存失败:", e)
+
+# ==================== 计算 profile hash 用于豁免 ====================
+def get_profile_hash(bio: str, full_name: str, username: str | None) -> str:
+    profile_str = f"{bio}|{full_name}|{username or ''}"
+    return hashlib.sha256(profile_str.encode('utf-8')).hexdigest()
+
+# ==================== 其他参数 ====================
+SHORT_MSG_THRESHOLD = 3
+MIN_CONSECUTIVE_COUNT = 2
+TIME_WINDOW_SECONDS = 60
+FILL_GARBAGE_MIN_RAW_LEN = 12
+FILL_GARBAGE_MAX_CLEAN_LEN = 8
+FILL_SPACE_RATIO = 0.30
+FILL_CHARS = set(r" .,，。！？*\\\~`-_=+[]{}()\"'\\|\n\t\r　")
+
+user_short_msg_history = {}
+
 # ==================== 启动 ====================
 async def main():
-    print("🚀 第十二版启动成功（定时任务完整版 + 修复交互）")
+    print("🚀 第十二版启动成功（管理员私聊全面按钮化 + FSM流程）")
     await load_data()
     await load_all()
-    await load_schedules()
-    asyncio.create_task(scheduler_loop())
     asyncio.create_task(cleanup_deleted_messages())
     await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
 
