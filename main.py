@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import time
+import hashlib
 from collections import deque
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
@@ -38,6 +39,9 @@ BIO_KEYWORDS_FILE = "/data/bio_keywords.json"
 reports = {}
 lock = asyncio.Lock()
 
+# 豁免列表：user_id → profile_hash (bio|full_name|username)
+exempt_users = {}  # 内存存储，重启丢失可接受
+
 # ==================== bio 专用关键词 ====================
 async def load_bio_keywords():
     try:
@@ -55,7 +59,7 @@ async def load_bio_keywords():
 
 BIO_KEYWORDS = []
 
-# 显示名称专用关键词（独立列表）
+# 显示名称专用关键词（独立）
 DISPLAY_NAME_KEYWORDS = [
     "加v", "加微信", "加qq", "加扣", "福利加", "约", "约炮", "资源私聊", "私我", "私聊我",
     "飞机", "纸飞机", "福利", "外围", "反差", "嫩模", "学生妹", "空姐", "人妻", "熟女",
@@ -140,7 +144,7 @@ async def cmd_list_display_keywords(message: Message):
         text = f"📋 当前显示名称敏感词（{len(DISPLAY_NAME_KEYWORDS)} 个）:\n" + "\n".join(f"• {w}" for w in sorted(DISPLAY_NAME_KEYWORDS))
     await message.reply(text[:4000])
 
-# ==================== 私聊 /admin 命令：显示所有可用命令 ====================
+# ==================== 私聊 /admin 命令 ====================
 @router.message(Command("admin"), F.chat.type == "private", F.from_user.id.in_(ADMIN_IDS))
 async def cmd_admin_help(message: Message):
     help_text = (
@@ -159,7 +163,7 @@ async def cmd_admin_help(message: Message):
     )
     await message.reply(help_text)
 
-# ==================== 其他参数（不变） ====================
+# ==================== 其他参数 ====================
 SHORT_MSG_THRESHOLD = 3
 MIN_CONSECUTIVE_COUNT = 2
 TIME_WINDOW_SECONDS = 60
@@ -170,7 +174,7 @@ FILL_CHARS = set(r" .,，。！？*\\~`-_=+[]{}()\"'\\|\n\t\r　")
 
 user_short_msg_history = {}
 
-# ==================== 数据持久化（不变） ====================
+# ==================== 数据持久化 ====================
 async def load_data():
     global reports
     try:
@@ -193,6 +197,11 @@ async def save_data():
         except Exception as e:
             print("保存失败:", e)
 
+# ==================== 计算 profile hash 用于豁免 ====================
+def get_profile_hash(bio: str, full_name: str, username: str | None) -> str:
+    profile_str = f"{bio}|{full_name}|{username or ''}"
+    return hashlib.sha256(profile_str.encode('utf-8')).hexdigest()
+
 # ==================== 用户信息检测（bio + 显示名称） ====================
 @router.message(F.chat.id.in_(GROUP_IDS))
 async def check_user_info(message: Message):
@@ -200,8 +209,26 @@ async def check_user_info(message: Message):
         return
 
     user = message.from_user
+    user_id = user.id
+
+    # 先检查豁免
+    async with lock:
+        if user_id in exempt_users:
+            current_hash = get_profile_hash(
+                (await bot.get_chat(user_id)).bio or "",
+                user.full_name or "",
+                user.username or ""
+            )
+            if current_hash == exempt_users[user_id]:
+                print(f"用户 {user_id} 在豁免中，跳过检测")
+                return
+            else:
+                # 资料变了，解除豁免
+                exempt_users.pop(user_id, None)
+                print(f"用户 {user_id} 资料变更，解除豁免")
+
     try:
-        chat_info = await bot.get_chat(user.id)
+        chat_info = await bot.get_chat(user_id)
         bio = (chat_info.bio or "").lower()
 
         # 1. bio 检查（优先）
@@ -209,7 +236,7 @@ async def check_user_info(message: Message):
         has_spam_in_bio = any(kw.lower() in bio for kw in BIO_KEYWORDS)
         bio_trigger = has_link_in_bio or has_spam_in_bio
 
-        # 2. 显示名称检查（bio 未触发时才查）
+        # 2. 显示名称检查
         display_name = (user.full_name or "").lower()
         has_spam_in_display = any(kw.lower() in display_name for kw in DISPLAY_NAME_KEYWORDS)
 
@@ -230,9 +257,10 @@ async def check_user_info(message: Message):
                 f"举报数: 0"
             )
 
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="举报该用户", callback_data=f"report:{message.message_id}")]
-            ])
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="举报该用户", callback_data=f"report:{message.message_id}"),
+                InlineKeyboardButton(text="误判/豁免 👮‍♂️", callback_data=f"exempt:{message.message_id}")
+            ]])
             warning = await message.reply(warning_text, reply_markup=keyboard)
 
             async with lock:
@@ -241,19 +269,87 @@ async def check_user_info(message: Message):
                     "suspect_id": user.id,
                     "chat_id": message.chat.id,
                     "reporters": set(),
-                    "original_text": warning_text
+                    "original_text": warning_text,
+                    "original_message_id": message.message_id  # 用于后续删除用户原消息
                 }
             await save_data()
-            print(f"触发用户检测: {user.id} | 原因: {reason_text}")
+            print(f"触发检测: {user.id} | 原因: {reason_text}")
 
     except Exception as e:
         print("用户信息检测异常:", e)
 
-# ==================== 短消息 + 填充检测（不变） ====================
+# ==================== 误判/豁免 处理 ====================
+@router.callback_query(F.data.startswith("exempt:"))
+async def handle_exempt(callback: CallbackQuery):
+    try:
+        original_id = int(callback.data.split(":", 1)[1])
+        caller_id = callback.from_user.id
+        chat_id = callback.message.chat.id
+
+        if caller_id not in ADMIN_IDS:
+            await callback.answer("仅管理员可操作", show_alert=True)
+            return
+
+        async with lock:
+            if original_id not in reports:
+                await callback.answer("记录已过期", show_alert=True)
+                return
+            data = reports[original_id]
+            suspect_id = data["suspect_id"]
+            warning_id = data["warning_id"]
+
+        # 获取当前 profile hash 并豁免
+        chat_info = await bot.get_chat(suspect_id)
+        bio = (chat_info.bio or "")
+        full_name = callback.from_user.full_name or ""  # 注意：这里用 callback.from_user 是管理员，应改为 suspect
+        # 修正：用 suspect_id 获取
+        suspect_user = await bot.get_chat(suspect_id)
+        full_name = suspect_user.first_name + " " + (suspect_user.last_name or "")
+        username = suspect_user.username
+        profile_hash = get_profile_hash(bio, full_name, username)
+
+        async with lock:
+            exempt_users[suspect_id] = profile_hash
+            # 删除警告消息
+            await bot.delete_message(chat_id, warning_id)
+
+        await callback.answer("已豁免此人 👮‍♂️\n后续资料不变将不再检测", show_alert=True)
+        print(f"管理员 {caller_id} 豁免用户 {suspect_id}")
+
+        # 从 reports 移除（可选，节省内存）
+        async with lock:
+            reports.pop(original_id, None)
+        await save_data()
+
+    except TelegramBadRequest as e:
+        await callback.answer(f"操作失败: {str(e)}", show_alert=True)
+    except Exception as e:
+        print("豁免异常:", e)
+        await callback.answer("操作失败", show_alert=True)
+
+# ==================== 短消息 + 填充检测（加豁免检查） ====================
 @router.message(F.chat.id.in_(GROUP_IDS), F.text)
 async def detect_short_or_filled_spam(message: Message):
-    if not message.text or message.from_user.is_bot: return
+    if not message.from_user or message.from_user.is_bot:
+        return
+
     user_id = message.from_user.id
+
+    # 检查豁免
+    async with lock:
+        if user_id in exempt_users:
+            # 重新计算当前 hash
+            chat_info = await bot.get_chat(user_id)
+            bio = (chat_info.bio or "")
+            full_name = message.from_user.full_name or ""
+            username = message.from_user.username
+            current_hash = get_profile_hash(bio, full_name, username)
+            if current_hash == exempt_users[user_id]:
+                return  # 豁免中，跳过
+            else:
+                exempt_users.pop(user_id, None)  # 资料变了，解除
+
+    # 原有逻辑...
     text = message.text
     text_len = len(text)
     now = time.time()
@@ -280,12 +376,13 @@ async def detect_short_or_filled_spam(message: Message):
     if reason:
         await send_warning(message, user_id, reason)
 
-# ==================== 发送警告（不变） ====================
+# ==================== 发送警告（新增误判按钮） ====================
 async def send_warning(message: Message, user_id: int, reason: str):
     warning_text = f"⚠️ 检测到疑似广告引流规避（{reason}）\n用户ID: {user_id}\n举报数: 0"
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="举报该用户", callback_data=f"report:{message.message_id}")]
-    ])
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="举报该用户", callback_data=f"report:{message.message_id}"),
+        InlineKeyboardButton(text="误判/豁免 👮‍♂️", callback_data=f"exempt:{message.message_id}")
+    ]])
     warning = await message.reply(warning_text, reply_markup=keyboard)
     async with lock:
         reports[message.message_id] = {
@@ -293,11 +390,12 @@ async def send_warning(message: Message, user_id: int, reason: str):
             "suspect_id": user_id,
             "chat_id": message.chat.id,
             "reporters": set(),
-            "original_text": warning_text
+            "original_text": warning_text,
+            "original_message_id": message.message_id
         }
     await save_data()
 
-# ==================== 举报处理（保持第八版格式） ====================
+# ==================== 举报处理（不变） ====================
 @router.callback_query(F.data.startswith("report:"))
 async def handle_report(callback: CallbackQuery):
     try:
@@ -345,7 +443,7 @@ async def handle_report(callback: CallbackQuery):
         print("举报处理异常:", e)
         await callback.answer("操作失败", show_alert=True)
 
-# ==================== 管理员封禁（保留原因） ====================
+# ==================== 管理员封禁 + 10秒后删除消息 ====================
 @router.callback_query(F.data.startswith(("ban24h:", "banperm:")))
 async def handle_ban(callback: CallbackQuery):
     try:
@@ -365,6 +463,7 @@ async def handle_ban(callback: CallbackQuery):
             data = reports[original_id]
             suspect_id = data["suspect_id"]
             warning_id = data["warning_id"]
+            original_message_id = data.get("original_message_id")
             original_text = data.get("original_text", "⚠️ 检测到疑似广告引流规避行为\n用户ID: 未知")
 
         until_date = int(time.time()) + 86400 if action == "ban24h" else None
@@ -399,6 +498,23 @@ async def handle_ban(callback: CallbackQuery):
         await callback.answer(f"已{ban_type}", show_alert=True)
         print(f"管理员 {caller_id} 对 {suspect_id} 执行 {ban_type} 在群 {chat_id}")
 
+        # 异步 10 秒后删除消息
+        async def delayed_delete():
+            await asyncio.sleep(10)
+            try:
+                await bot.delete_message(chat_id, warning_id)
+                print(f"删除警告消息 {warning_id}")
+            except TelegramBadRequest as e:
+                print(f"删除警告失败 {warning_id}: {e}")
+            try:
+                if original_message_id:
+                    await bot.delete_message(chat_id, original_message_id)
+                    print(f"删除用户原消息 {original_message_id}")
+            except TelegramBadRequest as e:
+                print(f"删除用户消息失败 {original_message_id}: {e}")
+
+        asyncio.create_task(delayed_delete())
+
         async with lock:
             reports.pop(original_id, None)
         await save_data()
@@ -407,23 +523,26 @@ async def handle_ban(callback: CallbackQuery):
         if "user_not_participant" in str(e).lower():
             await callback.answer("用户不在群组", show_alert=True)
         elif "not enough rights" in str(e).lower():
-            await callback.answer("机器人缺少限制权限", show_alert=True)
+            await callback.answer("机器人缺少权限", show_alert=True)
         else:
             await callback.answer(f"操作失败: {str(e)}", show_alert=True)
     except Exception as e:
         print("封禁异常:", e)
         await callback.answer("操作失败", show_alert=True)
 
-# ==================== /status 命令 ====================
+# ==================== /status 命令（新增豁免统计） ====================
 @router.message(Command("status"), F.chat.id.in_(GROUP_IDS), F.from_user.id.in_(ADMIN_IDS))
 async def cmd_status(message: Message):
+    async with lock:
+        exempt_count = len(exempt_users)
     text = (
         f"✅ 机器人运行正常\n"
         f"👮 管理员数量: {len(ADMIN_IDS)}\n"
         f"📊 监控群组: {len(GROUP_IDS)}\n"
         f"📁 当前举报记录: {len(reports)} 条\n"
         f"🚫 简介敏感词数量: {len(BIO_KEYWORDS)} 个\n"
-        f"🚫 显示名称敏感词数量: {len(DISPLAY_NAME_KEYWORDS)} 个"
+        f"🚫 显示名称敏感词数量: {len(DISPLAY_NAME_KEYWORDS)} 个\n"
+        f"🛡️ 当前豁免用户: {exempt_count} 人"
     )
     await message.reply(text, disable_notification=True)
 
@@ -459,7 +578,7 @@ async def cleanup_deleted_messages():
 
 # ==================== 启动 ====================
 async def main():
-    print("🚀 第十版启动成功（独立显示名称关键词管理 + /admin 命令）")
+    print("🚀 第十一版启动成功（新增误判/豁免 👮‍♂️ + 封禁后10秒删除消息）")
     await load_data()
     await load_all()
     asyncio.create_task(cleanup_deleted_messages())
