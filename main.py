@@ -34,71 +34,132 @@ router = Router()
 dp.include_router(router)
 
 DATA_FILE = "/data/reports.json"
-KEYWORDS_FILE = "/data/spam_keywords.json"
+BIO_KEYWORDS_FILE = "/data/bio_keywords.json"
 reports = {}
 lock = asyncio.Lock()
 
-# ==================== 敏感词热更新（JSON + 私聊管理） ====================
-async def load_keywords():
+# ==================== bio 专用关键词 ====================
+async def load_bio_keywords():
     try:
-        os.makedirs(os.path.dirname(KEYWORDS_FILE), exist_ok=True)
-        if os.path.exists(KEYWORDS_FILE):
-            with open(KEYWORDS_FILE, "r", encoding="utf-8") as f:
+        os.makedirs(os.path.dirname(BIO_KEYWORDS_FILE), exist_ok=True)
+        if os.path.exists(BIO_KEYWORDS_FILE):
+            with open(BIO_KEYWORDS_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
         default = ["qq:", "qq：", "qq号", "加qq", "扣扣", "微信", "wx:", "weixin", "加我微信", "wxid_", "幼女", "萝莉", "少妇", "人妻", "福利", "约炮", "onlyfans", "小红书", "抖音", "纸飞机", "机场", "http", "https", "t.me/", "@"]
-        with open(KEYWORDS_FILE, "w", encoding="utf-8") as f:
+        with open(BIO_KEYWORDS_FILE, "w", encoding="utf-8") as f:
             json.dump(default, f, ensure_ascii=False, indent=2)
         return default
     except Exception as e:
-        print("加载敏感词失败，使用内置:", e)
+        print("加载 bio 关键词失败，使用内置:", e)
         return ["qq:", "微信", "幼女", "福利", "t.me/"]
 
-SPAM_KEYWORDS = []
+BIO_KEYWORDS = []
+
+# 显示名称专用关键词（独立列表）
+DISPLAY_NAME_KEYWORDS = [
+    "加v", "加微信", "加qq", "加扣", "福利加", "约", "约炮", "资源私聊", "私我", "私聊我",
+    "飞机", "纸飞机", "福利", "外围", "反差", "嫩模", "学生妹", "空姐", "人妻", "熟女",
+    "onlyfans", "of", "leak", "nudes", "十八+", "av"
+]
 
 async def load_all():
-    global SPAM_KEYWORDS
-    SPAM_KEYWORDS = await load_keywords()
-    print(f"🚀 敏感词加载完成: {len(SPAM_KEYWORDS)} 个")
+    global BIO_KEYWORDS
+    BIO_KEYWORDS = await load_bio_keywords()
+    print(f"🚀 bio 关键词加载完成: {len(BIO_KEYWORDS)} 个")
+    print(f"显示名称专用关键词: {len(DISPLAY_NAME_KEYWORDS)} 个")
 
-# ==================== 私聊敏感词管理 ====================
+# ==================== 私聊命令：bio 关键词管理 ====================
 @router.message(Command("addkw"), F.chat.type == "private", F.from_user.id.in_(ADMIN_IDS))
-async def cmd_add_keyword(message: Message):
+async def cmd_add_bio_keyword(message: Message):
     try:
         word = message.text.split(maxsplit=1)[1].strip().lower()
         if not word:
-            await message.reply("用法: /addkw 关键词")
+            await message.reply("用法: /addkw 关键词 （用于简介检测）")
             return
         async with lock:
-            if word not in SPAM_KEYWORDS:
-                SPAM_KEYWORDS.append(word)
-                with open(KEYWORDS_FILE, "w", encoding="utf-8") as f:
-                    json.dump(SPAM_KEYWORDS, f, ensure_ascii=False, indent=2)
-        await message.reply(f"✅ 已添加: {word}（当前 {len(SPAM_KEYWORDS)} 个）")
+            if word not in BIO_KEYWORDS:
+                BIO_KEYWORDS.append(word)
+                with open(BIO_KEYWORDS_FILE, "w", encoding="utf-8") as f:
+                    json.dump(BIO_KEYWORDS, f, ensure_ascii=False, indent=2)
+        await message.reply(f"✅ 简介敏感词已添加: {word}（当前 {len(BIO_KEYWORDS)} 个）")
     except Exception as e:
         await message.reply(f"添加失败: {e}")
 
 @router.message(Command("delkw"), F.chat.type == "private", F.from_user.id.in_(ADMIN_IDS))
-async def cmd_del_keyword(message: Message):
+async def cmd_del_bio_keyword(message: Message):
     try:
         word = message.text.split(maxsplit=1)[1].strip().lower()
         async with lock:
-            if word in SPAM_KEYWORDS:
-                SPAM_KEYWORDS.remove(word)
-                with open(KEYWORDS_FILE, "w", encoding="utf-8") as f:
-                    json.dump(SPAM_KEYWORDS, f, ensure_ascii=False, indent=2)
-                await message.reply(f"✅ 已删除: {word}（当前 {len(SPAM_KEYWORDS)} 个）")
+            if word in BIO_KEYWORDS:
+                BIO_KEYWORDS.remove(word)
+                with open(BIO_KEYWORDS_FILE, "w", encoding="utf-8") as f:
+                    json.dump(BIO_KEYWORDS, f, ensure_ascii=False, indent=2)
+                await message.reply(f"✅ 简介敏感词已删除: {word}（当前 {len(BIO_KEYWORDS)} 个）")
             else:
-                await message.reply("词不存在")
+                await message.reply("该词不在简介关键词列表中")
     except Exception as e:
         await message.reply(f"删除失败: {e}")
 
 @router.message(Command("listkw"), F.chat.type == "private", F.from_user.id.in_(ADMIN_IDS))
-async def cmd_list_keywords(message: Message):
+async def cmd_list_bio_keywords(message: Message):
     async with lock:
-        text = f"📋 当前敏感词（{len(SPAM_KEYWORDS)} 个）:\n" + "\n".join(f"• {w}" for w in sorted(SPAM_KEYWORDS))
+        text = f"📋 当前简介敏感词（{len(BIO_KEYWORDS)} 个）:\n" + "\n".join(f"• {w}" for w in sorted(BIO_KEYWORDS))
     await message.reply(text[:4000])
 
-# ==================== 其他参数 ====================
+# ==================== 私聊命令：显示名称关键词管理 ====================
+@router.message(Command("adddispkw"), F.chat.type == "private", F.from_user.id.in_(ADMIN_IDS))
+async def cmd_add_display_keyword(message: Message):
+    try:
+        word = message.text.split(maxsplit=1)[1].strip().lower()
+        if not word:
+            await message.reply("用法: /adddispkw 关键词 （用于显示名称检测）")
+            return
+        async with lock:
+            if word not in DISPLAY_NAME_KEYWORDS:
+                DISPLAY_NAME_KEYWORDS.append(word)
+        await message.reply(f"✅ 显示名称敏感词已添加: {word}（当前 {len(DISPLAY_NAME_KEYWORDS)} 个）")
+    except Exception as e:
+        await message.reply(f"添加失败: {e}")
+
+@router.message(Command("deldispkw"), F.chat.type == "private", F.from_user.id.in_(ADMIN_IDS))
+async def cmd_del_display_keyword(message: Message):
+    try:
+        word = message.text.split(maxsplit=1)[1].strip().lower()
+        async with lock:
+            if word in DISPLAY_NAME_KEYWORDS:
+                DISPLAY_NAME_KEYWORDS.remove(word)
+                await message.reply(f"✅ 显示名称敏感词已删除: {word}（当前 {len(DISPLAY_NAME_KEYWORDS)} 个）")
+            else:
+                await message.reply("该词不在显示名称关键词列表中")
+    except Exception as e:
+        await message.reply(f"删除失败: {e}")
+
+@router.message(Command("listdispkw"), F.chat.type == "private", F.from_user.id.in_(ADMIN_IDS))
+async def cmd_list_display_keywords(message: Message):
+    async with lock:
+        text = f"📋 当前显示名称敏感词（{len(DISPLAY_NAME_KEYWORDS)} 个）:\n" + "\n".join(f"• {w}" for w in sorted(DISPLAY_NAME_KEYWORDS))
+    await message.reply(text[:4000])
+
+# ==================== 私聊 /admin 命令：显示所有可用命令 ====================
+@router.message(Command("admin"), F.chat.type == "private", F.from_user.id.in_(ADMIN_IDS))
+async def cmd_admin_help(message: Message):
+    help_text = (
+        "👑 管理员命令列表（仅私聊有效）\n\n"
+        "简介（bio）关键词管理：\n"
+        "• /addkw 关键词 → 添加简介敏感词\n"
+        "• /delkw 关键词 → 删除简介敏感词\n"
+        "• /listkw → 查看当前简介敏感词列表\n\n"
+        "显示名称关键词管理：\n"
+        "• /adddispkw 关键词 → 添加显示名称敏感词\n"
+        "• /deldispkw 关键词 → 删除显示名称敏感词\n"
+        "• /listdispkw → 查看当前显示名称敏感词列表\n\n"
+        "其他：\n"
+        "• /status → 查看机器人运行状态（群内可用）\n"
+        "• /admin → 显示此帮助（当前消息）"
+    )
+    await message.reply(help_text)
+
+# ==================== 其他参数（不变） ====================
 SHORT_MSG_THRESHOLD = 3
 MIN_CONSECUTIVE_COUNT = 2
 TIME_WINDOW_SECONDS = 60
@@ -109,7 +170,7 @@ FILL_CHARS = set(r" .,，。！？*\\~`-_=+[]{}()\"'\\|\n\t\r　")
 
 user_short_msg_history = {}
 
-# ==================== 数据持久化 ====================
+# ==================== 数据持久化（不变） ====================
 async def load_data():
     global reports
     try:
@@ -132,22 +193,48 @@ async def save_data():
         except Exception as e:
             print("保存失败:", e)
 
-# ==================== bio 检测 ====================
+# ==================== 用户信息检测（bio + 显示名称） ====================
 @router.message(F.chat.id.in_(GROUP_IDS))
-async def check_user_bio(message: Message):
-    if not message.from_user or message.from_user.is_bot: return
+async def check_user_info(message: Message):
+    if not message.from_user or message.from_user.is_bot:
+        return
+
     user = message.from_user
     try:
         chat_info = await bot.get_chat(user.id)
         bio = (chat_info.bio or "").lower()
-        has_link = any(x in bio for x in ["http://", "https://", "t.me/", "@"])
-        has_spam = any(kw.lower() in bio for kw in SPAM_KEYWORDS)
-        if has_link or has_spam:
-            keyword_text = "链接" if has_link else "敏感词"
-            if has_link and has_spam: keyword_text = "链接 + 敏感词"
-            warning_text = f"⚠️ 检测到疑似广告引流规避（含{keyword_text}）\n用户ID: {user.id}\n举报数: 0"
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="举报该用户", callback_data=f"report:{message.message_id}")]])
+
+        # 1. bio 检查（优先）
+        has_link_in_bio = any(x in bio for x in ["http://", "https://", "t.me/", "@"])
+        has_spam_in_bio = any(kw.lower() in bio for kw in BIO_KEYWORDS)
+        bio_trigger = has_link_in_bio or has_spam_in_bio
+
+        # 2. 显示名称检查（bio 未触发时才查）
+        display_name = (user.full_name or "").lower()
+        has_spam_in_display = any(kw.lower() in display_name for kw in DISPLAY_NAME_KEYWORDS)
+
+        if bio_trigger or has_spam_in_display:
+            reason_parts = []
+            if has_link_in_bio:
+                reason_parts.append("简介含链接")
+            if has_spam_in_bio:
+                reason_parts.append("简介含敏感词")
+            if has_spam_in_display:
+                reason_parts.append("显示名称含敏感词，疑似用于引流")
+
+            reason_text = " + ".join(reason_parts)
+            warning_text = (
+                f"⚠️ 检测到疑似广告引流规避（{reason_text}）\n"
+                f"用户ID: {user.id}\n"
+                f"显示名称: {user.full_name}\n"
+                f"举报数: 0"
+            )
+
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="举报该用户", callback_data=f"report:{message.message_id}")]
+            ])
             warning = await message.reply(warning_text, reply_markup=keyboard)
+
             async with lock:
                 reports[message.message_id] = {
                     "warning_id": warning.message_id,
@@ -157,9 +244,12 @@ async def check_user_bio(message: Message):
                     "original_text": warning_text
                 }
             await save_data()
-    except Exception: pass
+            print(f"触发用户检测: {user.id} | 原因: {reason_text}")
 
-# ==================== 短消息 + 填充检测 ====================
+    except Exception as e:
+        print("用户信息检测异常:", e)
+
+# ==================== 短消息 + 填充检测（不变） ====================
 @router.message(F.chat.id.in_(GROUP_IDS), F.text)
 async def detect_short_or_filled_spam(message: Message):
     if not message.text or message.from_user.is_bot: return
@@ -190,7 +280,7 @@ async def detect_short_or_filled_spam(message: Message):
     if reason:
         await send_warning(message, user_id, reason)
 
-# ==================== 发送警告 ====================
+# ==================== 发送警告（不变） ====================
 async def send_warning(message: Message, user_id: int, reason: str):
     warning_text = f"⚠️ 检测到疑似广告引流规避（{reason}）\n用户ID: {user_id}\n举报数: 0"
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -207,7 +297,7 @@ async def send_warning(message: Message, user_id: int, reason: str):
         }
     await save_data()
 
-# ==================== 举报处理 ====================
+# ==================== 举报处理（保持第八版格式） ====================
 @router.callback_query(F.data.startswith("report:"))
 async def handle_report(callback: CallbackQuery):
     try:
@@ -229,7 +319,6 @@ async def handle_report(callback: CallbackQuery):
             chat_id = data["chat_id"]
             original_text = data.get("original_text", "⚠️ 检测到疑似广告引流规避行为\n用户ID: 未知")
 
-        # 保留前两行（原因 + 用户ID），替换最后一行
         lines = original_text.splitlines()
         prefix = "\n".join(lines[:2]) if len(lines) >= 2 else original_text
 
@@ -256,7 +345,7 @@ async def handle_report(callback: CallbackQuery):
         print("举报处理异常:", e)
         await callback.answer("操作失败", show_alert=True)
 
-# ==================== 管理员封禁 ====================
+# ==================== 管理员封禁（保留原因） ====================
 @router.callback_query(F.data.startswith(("ban24h:", "banperm:")))
 async def handle_ban(callback: CallbackQuery):
     try:
@@ -333,11 +422,12 @@ async def cmd_status(message: Message):
         f"👮 管理员数量: {len(ADMIN_IDS)}\n"
         f"📊 监控群组: {len(GROUP_IDS)}\n"
         f"📁 当前举报记录: {len(reports)} 条\n"
-        f"🚫 敏感词数量: {len(SPAM_KEYWORDS)} 个"
+        f"🚫 简介敏感词数量: {len(BIO_KEYWORDS)} 个\n"
+        f"🚫 显示名称敏感词数量: {len(DISPLAY_NAME_KEYWORDS)} 个"
     )
     await message.reply(text, disable_notification=True)
 
-# ==================== 自动清理已删除消息的警告 ====================
+# ==================== 自动清理 ====================
 async def cleanup_deleted_messages():
     while True:
         await asyncio.sleep(300)
@@ -365,11 +455,11 @@ async def cleanup_deleted_messages():
                 for oid in to_remove:
                     reports.pop(oid, None)
             await save_data()
-        await asyncio.sleep(1)  # 防止紧循环
+        await asyncio.sleep(1)
 
 # ==================== 启动 ====================
 async def main():
-    print("🚀 第八版启动成功（原因永久保留 + 精确状态格式）")
+    print("🚀 第十版启动成功（独立显示名称关键词管理 + /admin 命令）")
     await load_data()
     await load_all()
     asyncio.create_task(cleanup_deleted_messages())
