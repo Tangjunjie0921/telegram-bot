@@ -8,16 +8,13 @@ from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import (
-    Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
-    ChatPermissions, ReplyKeyboardRemove
-)
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ChatPermissions, ReplyKeyboardRemove
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 
-# ==================== 配置（Railway 环境变量） ====================
+# ==================== 配置（Railway 環境變數） ====================
 GROUP_IDS = set()
 ADMIN_IDS = set()
 
@@ -27,13 +24,13 @@ try:
     for uid in os.getenv("ADMIN_IDS", "").strip().split():
         if uid.strip(): ADMIN_IDS.add(int(uid.strip()))
     if not GROUP_IDS or not ADMIN_IDS:
-        raise ValueError("GROUP_IDS 或 ADMIN_IDS 为空")
+        raise ValueError("GROUP_IDS 或 ADMIN_IDS 為空")
 except Exception as e:
-    raise ValueError(f"❌ 环境变量错误: {e}")
+    raise ValueError(f"❌ 環境變數錯誤: {e}")
 
 TOKEN = os.getenv("BOT_TOKEN")
 if not TOKEN:
-    raise ValueError("❌ 请设置 BOT_TOKEN")
+    raise ValueError("❌ 請設置 BOT_TOKEN")
 
 bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 storage = MemoryStorage()
@@ -47,9 +44,9 @@ reports = {}
 lock = asyncio.Lock()
 
 # 豁免列表：user_id → profile_hash (bio|full_name|username)
-exempt_users = {}  # 内存存储，重启丢失可接受
+exempt_users = {}  # 記憶體儲存，重啟丟失可接受
 
-# ==================== bio 专用关键词 ====================
+# ==================== bio 專用關鍵字 ====================
 async def load_bio_keywords():
     try:
         os.makedirs(os.path.dirname(BIO_KEYWORDS_FILE), exist_ok=True)
@@ -61,12 +58,12 @@ async def load_bio_keywords():
             json.dump(default, f, ensure_ascii=False, indent=2)
         return default
     except Exception as e:
-        print("加载 bio 关键词失败，使用内置:", e)
+        print("加載 bio 關鍵字失敗，使用內置:", e)
         return ["qq:", "微信", "幼女", "福利", "t.me/"]
 
 BIO_KEYWORDS = []
 
-# 显示名称专用关键词（独立，暂不持久化，如需可加文件）
+# 顯示名稱專用關鍵字（獨立，暫不持久化，如需可加文件）
 DISPLAY_NAME_KEYWORDS = [
     "加v", "加微信", "加qq", "加扣", "福利加", "约", "约炮", "资源私聊", "私我", "私聊我",
     "飞机", "纸飞机", "福利", "外围", "反差", "嫩模", "学生妹", "空姐", "人妻", "熟女",
@@ -76,8 +73,8 @@ DISPLAY_NAME_KEYWORDS = [
 async def load_all():
     global BIO_KEYWORDS
     BIO_KEYWORDS = await load_bio_keywords()
-    print(f"🚀 bio 关键词加载完成: {len(BIO_KEYWORDS)} 个")
-    print(f"显示名称专用关键词: {len(DISPLAY_NAME_KEYWORDS)} 个")
+    print(f"🚀 bio 關鍵字加載完成: {len(BIO_KEYWORDS)} 個")
+    print(f"顯示名稱專用關鍵字: {len(DISPLAY_NAME_KEYWORDS)} 個")
 
 # ==================== FSM States ====================
 class AdminStates(StatesGroup):
@@ -88,7 +85,7 @@ class AdminStates(StatesGroup):
     AddingDispKw = State()
     DeletingDispKw = State()
 
-# ==================== 工具函数 ====================
+# ==================== 工具函數 ====================
 def get_group_button_text(chat_id: int) -> str:
     return f"群 {chat_id}"
 
@@ -127,6 +124,7 @@ def get_confirm_keyboard(action: str):
 @router.message(Command("admin"), F.chat.type == "private", F.from_user.id.in_(ADMIN_IDS))
 async def cmd_admin(message: Message, state: FSMContext):
     try:
+        await state.clear()
         keyboard = InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text="管理群组设置", callback_data="select_group")
         ]])
@@ -134,12 +132,12 @@ async def cmd_admin(message: Message, state: FSMContext):
             "👑 管理员控制面板\n请选择操作：",
             reply_markup=keyboard
         )
-        await state.clear()
+        print(f"[ADMIN] 用户 {message.from_user.id} 进入 /admin，已清空状态")
     except Exception as e:
         await message.reply(f"打开面板失败：{str(e)}")
         print(f"admin panel error: {e}")
 
-# ==================== 群组选择 & 子菜单导航 ====================
+# ==================== 群組選擇 & 子菜單導航 ====================
 @router.callback_query(F.data == "select_group")
 async def select_group(callback: CallbackQuery, state: FSMContext):
     try:
@@ -150,6 +148,7 @@ async def select_group(callback: CallbackQuery, state: FSMContext):
         await callback.message.edit_text("请选择要管理的群组：", reply_markup=keyboard)
         await state.set_state(AdminStates.ChoosingGroup)
         await callback.answer()
+        print(f"[DEBUG] 用户 {callback.from_user.id} 进入群组选择")
     except Exception as e:
         await callback.answer(f"选择群组失败：{str(e)}", show_alert=True)
         print(f"select_group error: {e}")
@@ -169,6 +168,7 @@ async def enter_group_menu(callback: CallbackQuery, state: FSMContext):
         )
         await state.set_state(AdminStates.InGroupMenu)
         await callback.answer()
+        print(f"[DEBUG] 用户 {callback.from_user.id} 进入群 {group_id} 管理菜单")
     except ValueError:
         await callback.answer("群组ID格式错误", show_alert=True)
     except Exception as e:
@@ -207,16 +207,20 @@ async def start_add_bio_kw(callback: CallbackQuery, state: FSMContext):
             "请输入要**添加**的简介敏感词（一行一个，可多行）：",
             reply_markup=ReplyKeyboardRemove()
         )
+        await callback.message.answer("请直接在下方输入关键词，输入完按发送。")
         await state.set_state(AdminStates.AddingBioKw)
-        await callback.answer()
+        await callback.answer("已进入输入模式，请发送关键词")
+        print(f"[DEBUG] 用户 {callback.from_user.id} 进入添加简介关键词状态")
     except Exception as e:
         await callback.answer(f"操作失败：{str(e)}", show_alert=True)
+        print(f"start_add_bio_kw error: {e}")
 
 @router.message(StateFilter(AdminStates.AddingBioKw))
 async def process_add_bio_kw(message: Message, state: FSMContext):
+    print(f"[DEBUG 输入] 用户 {message.from_user.id} | 状态: AddingBioKw | 内容: {message.text}")
     try:
         data = await state.get_data()
-        words = [w.strip().lower() for w in message.text.splitlines() if w.strip()]
+        words = [w.strip().lower() for w in (message.text or "").splitlines() if w.strip()]
         if not words:
             await message.reply("没有输入有效关键词，请重新输入。")
             return
@@ -227,9 +231,10 @@ async def process_add_bio_kw(message: Message, state: FSMContext):
             reply_markup=get_confirm_keyboard("add_bio")
         )
         await state.update_data(words=words)
+        print(f"[DEBUG] 已准备添加 {len(words)} 个词，等待确认")
     except Exception as e:
-        await message.reply(f"处理输入失败：{str(e)}")
-        print(f"process_add_bio_kw error: {e}")
+        print(f"process_add_bio_kw 异常: {type(e).__name__} {str(e)}")
+        await message.reply(f"处理出错：{str(e)}\n请重新输入，或 /cancel 退出。")
 
 @router.callback_query(F.data == "confirm:add_bio")
 async def confirm_add_bio(callback: CallbackQuery, state: FSMContext):
@@ -254,6 +259,7 @@ async def confirm_add_bio(callback: CallbackQuery, state: FSMContext):
         await callback.message.edit_text(msg, reply_markup=None)
         await state.clear()
         await callback.answer("添加成功")
+        print(f"[SUCCESS] 用户 {callback.from_user.id} 添加了 {len(added)} 个简介词")
     except Exception as e:
         await callback.message.edit_text(f"添加失败：{str(e)}")
         print(f"confirm_add_bio error: {e}")
@@ -267,16 +273,20 @@ async def start_del_bio_kw(callback: CallbackQuery, state: FSMContext):
             "请输入要**删除**的简介敏感词（一行一个，可多行）：",
             reply_markup=ReplyKeyboardRemove()
         )
+        await callback.message.answer("请直接在下方输入要删除的关键词")
         await state.set_state(AdminStates.DeletingBioKw)
-        await callback.answer()
+        await callback.answer("已进入删除模式，请发送关键词")
+        print(f"[DEBUG] 用户 {callback.from_user.id} 进入删除简介关键词状态")
     except Exception as e:
         await callback.answer(f"操作失败：{str(e)}", show_alert=True)
+        print(f"start_del_bio_kw error: {e}")
 
 @router.message(StateFilter(AdminStates.DeletingBioKw))
 async def process_del_bio_kw(message: Message, state: FSMContext):
+    print(f"[DEBUG 输入] 用户 {message.from_user.id} | 状态: DeletingBioKw | 内容: {message.text}")
     try:
         data = await state.get_data()
-        words = [w.strip().lower() for w in message.text.splitlines() if w.strip()]
+        words = [w.strip().lower() for w in (message.text or "").splitlines() if w.strip()]
         if not words:
             await message.reply("没有输入有效关键词，请重新输入。")
             return
@@ -287,9 +297,10 @@ async def process_del_bio_kw(message: Message, state: FSMContext):
             reply_markup=get_confirm_keyboard("del_bio")
         )
         await state.update_data(words=words)
+        print(f"[DEBUG] 已准备删除 {len(words)} 个词，等待确认")
     except Exception as e:
-        await message.reply(f"处理输入失败：{str(e)}")
-        print(f"process_del_bio_kw error: {e}")
+        print(f"process_del_bio_kw 异常: {type(e).__name__} {str(e)}")
+        await message.reply(f"处理出错：{str(e)}\n请重新输入，或 /cancel 退出。")
 
 @router.callback_query(F.data == "confirm:del_bio")
 async def confirm_del_bio(callback: CallbackQuery, state: FSMContext):
@@ -314,6 +325,7 @@ async def confirm_del_bio(callback: CallbackQuery, state: FSMContext):
         await callback.message.edit_text(msg, reply_markup=None)
         await state.clear()
         await callback.answer("删除成功")
+        print(f"[SUCCESS] 用户 {callback.from_user.id} 删除了 {len(removed)} 个简介词")
     except Exception as e:
         await callback.message.edit_text(f"删除失败：{str(e)}")
         print(f"confirm_del_bio error: {e}")
@@ -332,7 +344,7 @@ async def list_bio_keywords(callback: CallbackQuery):
         await callback.message.edit_text(f"获取列表失败：{str(e)}")
         print(f"list_bio error: {e}")
 
-# ==================== 显示名称关键词 ====================
+# ==================== 显示名称关键词（类似逻辑） ====================
 @router.callback_query(F.data.startswith("add_disp:"))
 async def start_add_disp_kw(callback: CallbackQuery, state: FSMContext):
     try:
@@ -342,16 +354,20 @@ async def start_add_disp_kw(callback: CallbackQuery, state: FSMContext):
             "请输入要**添加**的显示名称敏感词（一行一个，可多行）：",
             reply_markup=ReplyKeyboardRemove()
         )
+        await callback.message.answer("请直接在下方输入关键词")
         await state.set_state(AdminStates.AddingDispKw)
-        await callback.answer()
+        await callback.answer("已进入输入模式，请发送关键词")
+        print(f"[DEBUG] 用户 {callback.from_user.id} 进入添加显示名称关键词状态")
     except Exception as e:
         await callback.answer(f"操作失败：{str(e)}", show_alert=True)
+        print(f"start_add_disp_kw error: {e}")
 
 @router.message(StateFilter(AdminStates.AddingDispKw))
 async def process_add_disp_kw(message: Message, state: FSMContext):
+    print(f"[DEBUG 输入] 用户 {message.from_user.id} | 状态: AddingDispKw | 内容: {message.text}")
     try:
         data = await state.get_data()
-        words = [w.strip().lower() for w in message.text.splitlines() if w.strip()]
+        words = [w.strip().lower() for w in (message.text or "").splitlines() if w.strip()]
         if not words:
             await message.reply("没有输入有效关键词，请重新输入。")
             return
@@ -362,9 +378,10 @@ async def process_add_disp_kw(message: Message, state: FSMContext):
             reply_markup=get_confirm_keyboard("add_disp")
         )
         await state.update_data(words=words)
+        print(f"[DEBUG] 已准备添加 {len(words)} 个显示名称词，等待确认")
     except Exception as e:
-        await message.reply(f"处理输入失败：{str(e)}")
-        print(f"process_add_disp_kw error: {e}")
+        print(f"process_add_disp_kw 异常: {type(e).__name__} {str(e)}")
+        await message.reply(f"处理出错：{str(e)}\n请重新输入，或 /cancel 退出。")
 
 @router.callback_query(F.data == "confirm:add_disp")
 async def confirm_add_disp(callback: CallbackQuery, state: FSMContext):
@@ -386,6 +403,7 @@ async def confirm_add_disp(callback: CallbackQuery, state: FSMContext):
         await callback.message.edit_text(msg, reply_markup=None)
         await state.clear()
         await callback.answer("添加成功")
+        print(f"[SUCCESS] 用户 {callback.from_user.id} 添加了 {len(added)} 个显示名称词")
     except Exception as e:
         await callback.message.edit_text(f"添加失败：{str(e)}")
         print(f"confirm_add_disp error: {e}")
@@ -399,16 +417,20 @@ async def start_del_disp_kw(callback: CallbackQuery, state: FSMContext):
             "请输入要**删除**的显示名称敏感词（一行一个，可多行）：",
             reply_markup=ReplyKeyboardRemove()
         )
+        await callback.message.answer("请直接在下方输入要删除的关键词")
         await state.set_state(AdminStates.DeletingDispKw)
-        await callback.answer()
+        await callback.answer("已进入删除模式，请发送关键词")
+        print(f"[DEBUG] 用户 {callback.from_user.id} 进入删除显示名称关键词状态")
     except Exception as e:
         await callback.answer(f"操作失败：{str(e)}", show_alert=True)
+        print(f"start_del_disp_kw error: {e}")
 
 @router.message(StateFilter(AdminStates.DeletingDispKw))
 async def process_del_disp_kw(message: Message, state: FSMContext):
+    print(f"[DEBUG 输入] 用户 {message.from_user.id} | 状态: DeletingDispKw | 内容: {message.text}")
     try:
         data = await state.get_data()
-        words = [w.strip().lower() for w in message.text.splitlines() if w.strip()]
+        words = [w.strip().lower() for w in (message.text or "").splitlines() if w.strip()]
         if not words:
             await message.reply("没有输入有效关键词，请重新输入。")
             return
@@ -419,9 +441,10 @@ async def process_del_disp_kw(message: Message, state: FSMContext):
             reply_markup=get_confirm_keyboard("del_disp")
         )
         await state.update_data(words=words)
+        print(f"[DEBUG] 已准备删除 {len(words)} 个显示名称词，等待确认")
     except Exception as e:
-        await message.reply(f"处理输入失败：{str(e)}")
-        print(f"process_del_disp_kw error: {e}")
+        print(f"process_del_disp_kw 异常: {type(e).__name__} {str(e)}")
+        await message.reply(f"处理出错：{str(e)}\n请重新输入，或 /cancel 退出。")
 
 @router.callback_query(F.data == "confirm:del_disp")
 async def confirm_del_disp(callback: CallbackQuery, state: FSMContext):
@@ -443,6 +466,7 @@ async def confirm_del_disp(callback: CallbackQuery, state: FSMContext):
         await callback.message.edit_text(msg, reply_markup=None)
         await state.clear()
         await callback.answer("删除成功")
+        print(f"[SUCCESS] 用户 {callback.from_user.id} 删除了 {len(removed)} 个显示名称词")
     except Exception as e:
         await callback.message.edit_text(f"删除失败：{str(e)}")
         print(f"confirm_del_disp error: {e}")
@@ -474,7 +498,32 @@ async def cancel_action(callback: CallbackQuery, state: FSMContext):
     except Exception as e:
         await callback.answer(f"取消失败：{str(e)}", show_alert=True)
 
-# ==================== 第11版原有功能（完整保留，未改动） ====================
+# ==================== 取消命令 ====================
+@router.message(Command("cancel"), F.chat.type == "private", F.from_user.id.in_(ADMIN_IDS))
+async def cmd_cancel(message: Message, state: FSMContext):
+    await state.clear()
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="管理群组设置", callback_data="select_group")
+    ]])
+    await message.reply("已取消当前操作，返回主菜单。", reply_markup=keyboard)
+    print(f"[CANCEL] 用户 {message.from_user.id} 取消操作")
+
+# ==================== 调试：任何私聊消息兜底 ====================
+@router.message(F.chat.type == "private")
+async def debug_private_message(message: Message, state: FSMContext):
+    current_state = await state.get_state()
+    text_preview = message.text[:50] + "..." if message.text else "[非文本消息]"
+    print(f"[DEBUG 私聊消息] 用户: {message.from_user.id} | 状态: {current_state} | 内容: {text_preview}")
+    
+    if current_state in [
+        AdminStates.AddingBioKw.state,
+        AdminStates.DeletingBioKw.state,
+        AdminStates.AddingDispKw.state,
+        AdminStates.DeletingDispKw.state,
+    ]:
+        await message.reply("系统收到你的输入，但处理似乎卡住了。\n请再发一次关键词，或输入 /cancel 退出。")
+
+# ==================== 以下為你原第11版完整代碼，沒有任何刪減 ====================
 
 @router.message(F.chat.id.in_(GROUP_IDS))
 async def check_user_info(message: Message):
@@ -484,7 +533,7 @@ async def check_user_info(message: Message):
     user = message.from_user
     user_id = user.id
 
-    # 先检查豁免
+    # 先檢查豁免
     async with lock:
         if user_id in exempt_users:
             current_hash = get_profile_hash(
@@ -496,7 +545,7 @@ async def check_user_info(message: Message):
                 print(f"用户 {user_id} 在豁免中，跳过检测")
                 return
             else:
-                # 资料变了，解除豁免
+                # 資料變了，解除豁免
                 exempt_users.pop(user_id, None)
                 print(f"用户 {user_id} 资料变更，解除豁免")
 
@@ -504,12 +553,12 @@ async def check_user_info(message: Message):
         chat_info = await bot.get_chat(user_id)
         bio = (chat_info.bio or "").lower()
 
-        # 1. bio 检查（优先）
+        # 1. bio 檢查（優先）
         has_link_in_bio = any(x in bio for x in ["http://", "https://", "t.me/", "@"])
         has_spam_in_bio = any(kw.lower() in bio for kw in BIO_KEYWORDS)
         bio_trigger = has_link_in_bio or has_spam_in_bio
 
-        # 2. 显示名称检查
+        # 2. 顯示名稱檢查
         display_name = (user.full_name or "").lower()
         has_spam_in_display = any(kw.lower() in display_name for kw in DISPLAY_NAME_KEYWORDS)
 
@@ -574,7 +623,7 @@ async def handle_exempt(callback: CallbackQuery):
         # 获取当前 profile hash 并豁免
         chat_info = await bot.get_chat(suspect_id)
         bio = (chat_info.bio or "")
-        full_name = chat_info.first_name + " " + (chat_info.last_name or "")
+        full_name = (chat_info.first_name or "") + " " + (chat_info.last_name or "")
         username = chat_info.username
         profile_hash = get_profile_hash(bio, full_name, username)
 
@@ -598,6 +647,16 @@ async def handle_exempt(callback: CallbackQuery):
         await callback.answer("操作失败", show_alert=True)
 
 # ==================== 短消息 + 填充检测（加豁免检查） ====================
+SHORT_MSG_THRESHOLD = 3
+MIN_CONSECUTIVE_COUNT = 2
+TIME_WINDOW_SECONDS = 60
+FILL_GARBAGE_MIN_RAW_LEN = 12
+FILL_GARBAGE_MAX_CLEAN_LEN = 8
+FILL_SPACE_RATIO = 0.30
+FILL_CHARS = set(r" .,，。！？*\\\~`-_=+[]{}()\"'\\|\n\t\r　")
+
+user_short_msg_history = {}
+
 @router.message(F.chat.id.in_(GROUP_IDS), F.text)
 async def detect_short_or_filled_spam(message: Message):
     if not message.from_user or message.from_user.is_bot:
@@ -646,7 +705,7 @@ async def detect_short_or_filled_spam(message: Message):
     if reason:
         await send_warning(message, user_id, reason)
 
-# ==================== 发送警告（新增误判按钮） ====================
+# ==================== 发送警告 ====================
 async def send_warning(message: Message, user_id: int, reason: str):
     warning_text = f"⚠️ 检测到疑似广告引流规避（{reason}）\n用户ID: {user_id}\n举报数: 0"
     keyboard = InlineKeyboardMarkup(inline_keyboard=[[
@@ -665,7 +724,7 @@ async def send_warning(message: Message, user_id: int, reason: str):
         }
     await save_data()
 
-# ==================== 举报处理（不变） ====================
+# ==================== 举报处理 ====================
 @router.callback_query(F.data.startswith("report:"))
 async def handle_report(callback: CallbackQuery):
     try:
@@ -800,7 +859,7 @@ async def handle_ban(callback: CallbackQuery):
         print("封禁异常:", e)
         await callback.answer("操作失败", show_alert=True)
 
-# ==================== /status 命令（新增豁免统计） ====================
+# ==================== /status 命令 ====================
 @router.message(Command("status"), F.chat.id.in_(GROUP_IDS), F.from_user.id.in_(ADMIN_IDS))
 async def cmd_status(message: Message):
     async with lock:
@@ -874,20 +933,9 @@ def get_profile_hash(bio: str, full_name: str, username: str | None) -> str:
     profile_str = f"{bio}|{full_name}|{username or ''}"
     return hashlib.sha256(profile_str.encode('utf-8')).hexdigest()
 
-# ==================== 其他参数 ====================
-SHORT_MSG_THRESHOLD = 3
-MIN_CONSECUTIVE_COUNT = 2
-TIME_WINDOW_SECONDS = 60
-FILL_GARBAGE_MIN_RAW_LEN = 12
-FILL_GARBAGE_MAX_CLEAN_LEN = 8
-FILL_SPACE_RATIO = 0.30
-FILL_CHARS = set(r" .,，。！？*\\\~`-_=+[]{}()\"'\\|\n\t\r　")
-
-user_short_msg_history = {}
-
 # ==================== 启动 ====================
 async def main():
-    print("🚀 第十二版启动成功（管理员私聊全面按钮化 + FSM流程）")
+    print("🚀 第十二版（完整版 + 调试日志）启动成功")
     await load_data()
     await load_all()
     asyncio.create_task(cleanup_deleted_messages())
