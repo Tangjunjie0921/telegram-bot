@@ -46,6 +46,7 @@ lock = asyncio.Lock()
 
 exempt_users = {}
 
+# 退群拉黑配置：群ID(str) → {"enabled": bool, "duration": int秒，0=永久}
 blacklist_config = {}
 
 async def load_blacklist_config():
@@ -54,6 +55,8 @@ async def load_blacklist_config():
         if os.path.exists(BLACKLIST_CONFIG_FILE):
             with open(BLACKLIST_CONFIG_FILE, "r", encoding="utf-8") as f:
                 blacklist_config = json.load(f)
+        else:
+            blacklist_config = {}
     except Exception as e:
         print("加载黑名单配置失败:", e)
 
@@ -123,7 +126,7 @@ def get_group_menu_keyboard(group_id: int):
         [InlineKeyboardButton(text="添加显示名敏感词", callback_data=f"add_disp:{group_id}")],
         [InlineKeyboardButton(text="删除显示名敏感词", callback_data=f"del_disp:{group_id}")],
         [InlineKeyboardButton(text="查看显示名敏感词", callback_data=f"list_disp:{group_id}")],
-        [InlineKeyboardButton(text="退群拉黑设置", callback_data=f"blacklist:{group_id}")],
+        [InlineKeyboardButton(text="退群自动拉黑", callback_data=f"blacklist:{group_id}")],
         [InlineKeyboardButton(text="← 返回主菜单", callback_data="back_to_main")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -131,9 +134,9 @@ def get_group_menu_keyboard(group_id: int):
 def get_blacklist_duration_keyboard(group_id: int):
     buttons = [
         [InlineKeyboardButton(text="开启 - 1小时", callback_data=f"blacklist_set:{group_id}:3600")],
-        [InlineKeyboardButton(text="开启 - 1天", callback_data=f"blacklist_set:{group_id}:86400")],
+        [InlineKeyboardButton(text="开启 - 1周", callback_data=f"blacklist_set:{group_id}:604800")],
         [InlineKeyboardButton(text="开启 - 永久", callback_data=f"blacklist_set:{group_id}:0")],
-        [InlineKeyboardButton(text="关闭", callback_data=f"blacklist_set:{group_id}:off")],
+        [InlineKeyboardButton(text="关闭自动拉黑", callback_data=f"blacklist_set:{group_id}:off")],
         [InlineKeyboardButton(text="← 返回子菜单", callback_data=f"group:{group_id}")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -154,7 +157,8 @@ async def cmd_admin(message: Message, state: FSMContext):
         await message.reply("👑 管理员控制面板\n请选择操作：", reply_markup=kb)
     except Exception as e:
         await message.reply(f"打开失败：{str(e)}")
-        @router.callback_query(F.data == "select_group")
+        
+@router.callback_query(F.data == "select_group")
 async def select_group(callback: CallbackQuery, state: FSMContext):
     try:
         if not GROUP_IDS:
@@ -195,7 +199,7 @@ async def back_to_main(callback: CallbackQuery, state: FSMContext):
     except Exception as e:
         await callback.answer(f"返回失败：{str(e)}", show_alert=True)
 
-# 添加简介
+# ==================== 简介关键词功能 ====================
 @router.callback_query(F.data.startswith("add_bio:"))
 async def start_add_bio_kw(callback: CallbackQuery, state: FSMContext):
     try:
@@ -242,7 +246,6 @@ async def confirm_add_bio(callback: CallbackQuery, state: FSMContext):
     except Exception as e:
         await callback.message.edit_text(f"添加失败：{str(e)}")
 
-# 删除简介
 @router.callback_query(F.data.startswith("del_bio:"))
 async def start_del_bio_kw(callback: CallbackQuery, state: FSMContext):
     try:
@@ -293,7 +296,6 @@ async def confirm_del_bio(callback: CallbackQuery, state: FSMContext):
     except Exception as e:
         await callback.message.edit_text(f"删除失败：{str(e)}")
 
-# 查看简介
 @router.callback_query(F.data.startswith("list_bio:"))
 async def list_bio_keywords(callback: CallbackQuery, state: FSMContext):
     try:
@@ -309,7 +311,8 @@ async def list_bio_keywords(callback: CallbackQuery, state: FSMContext):
         await callback.answer("已查看")
     except Exception as e:
         await callback.message.edit_text(f"查看失败：{str(e)}")
-        # 添加显示名
+
+# 添加显示名
 @router.callback_query(F.data.startswith("add_disp:"))
 async def start_add_disp_kw(callback: CallbackQuery, state: FSMContext):
     try:
@@ -419,7 +422,7 @@ async def list_disp_keywords(callback: CallbackQuery, state: FSMContext):
     except Exception as e:
         await callback.message.edit_text(f"查看失败：{str(e)}")
 
-# ==================== 退群拉黑设置 ====================
+# ==================== 退群自动拉黑设置 ====================
 @router.callback_query(F.data.startswith("blacklist:"))
 async def start_blacklist_setting(callback: CallbackQuery, state: FSMContext):
     try:
@@ -428,7 +431,7 @@ async def start_blacklist_setting(callback: CallbackQuery, state: FSMContext):
         current = blacklist_config.get(str(group_id), {"enabled": False, "duration": 0})
         status = "已开启" if current["enabled"] else "已关闭"
         duration_text = "永久" if current["duration"] == 0 else f"{current['duration']//3600}小时" if current["duration"] % 3600 == 0 else f"{current['duration']}秒"
-        text = f"当前退群拉黑：{status}，时长：{duration_text}\n请选择操作："
+        text = f"当前退群自动拉黑：{status}，时长：{duration_text}\n请选择操作："
         kb = get_blacklist_duration_keyboard(group_id)
         await callback.message.edit_text(text, reply_markup=kb)
         await state.set_state(AdminStates.SettingBlacklist)
@@ -453,7 +456,7 @@ async def set_blacklist_duration(callback: CallbackQuery, state: FSMContext):
         await save_blacklist_config()
         status = "已开启" if enabled else "已关闭"
         dur_text = "永久" if duration == 0 else f"{duration//3600}小时" if duration % 3600 == 0 else f"{duration}秒"
-        text = f"设置成功！退群拉黑：{status}，时长：{dur_text}"
+        text = f"设置成功！退群自动拉黑：{status}，时长：{dur_text}"
         kb = get_group_menu_keyboard(group_id)
         await callback.message.edit_text(text + "\n返回子菜单", reply_markup=kb)
         await state.set_state(AdminStates.InGroupMenu)
@@ -475,10 +478,11 @@ async def on_chat_member_updated(update: ChatMemberUpdated):
         duration = config["duration"]
         until_date = None if duration == 0 else int(time.time()) + duration
         await bot.ban_chat_member(chat_id=group_id, user_id=user_id, until_date=until_date)
-        print(f"退群拉黑成功：群 {group_id} 用户 {user_id} 时长 {duration}秒")
+        print(f"退群自动拉黑成功：群 {group_id} 用户 {user_id} 时长 {duration}秒")
     except Exception as e:
         print("退群拉黑失败:", e)
-        # ==================== 原有群内功能（完整保留） ====================
+
+# ==================== 原有群内功能（完整保留） ====================
 SHORT_MSG_THRESHOLD = 3
 MIN_CONSECUTIVE_COUNT = 2
 TIME_WINDOW_SECONDS = 60
@@ -871,11 +875,11 @@ async def cleanup_deleted_messages():
 
 # ==================== 启动 ====================
 async def main():
-    print("🚀 机器人启动成功（完整版，含退群拉黑）")
+    print("🚀 机器人启动成功（完整版，含退群自动拉黑）")
     await load_data()
     await load_all()
     asyncio.create_task(cleanup_deleted_messages())
     await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(main())        
