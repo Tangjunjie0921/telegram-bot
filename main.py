@@ -45,7 +45,6 @@ async def load_keywords():
         if os.path.exists(KEYWORDS_FILE):
             with open(KEYWORDS_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
-        # 首次创建默认列表
         default = ["qq:", "qq：", "qq号", "加qq", "扣扣", "微信", "wx:", "weixin", "加我微信", "wxid_", "幼女", "萝莉", "少妇", "人妻", "福利", "约炮", "onlyfans", "小红书", "抖音", "纸飞机", "机场", "http", "https", "t.me/", "@"]
         with open(KEYWORDS_FILE, "w", encoding="utf-8") as f:
             json.dump(default, f, ensure_ascii=False, indent=2)
@@ -66,7 +65,7 @@ async def load_all():
 async def cmd_add_keyword(message: Message):
     try:
         word = message.text.split(maxsplit=1)[1].strip().lower()
-        if not word: 
+        if not word:
             await message.reply("用法: /addkw 关键词")
             return
         async with lock:
@@ -163,7 +162,6 @@ async def detect_short_or_filled_spam(message: Message):
     text_len = len(text)
     now = time.time()
 
-    # 单次填充检测
     if text_len >= FILL_GARBAGE_MIN_RAW_LEN:
         cleaned = ''.join(c for c in text if c not in FILL_CHARS).strip()
         clean_len = len(cleaned)
@@ -173,7 +171,6 @@ async def detect_short_or_filled_spam(message: Message):
             await send_warning(message, user_id, "单次填充式规避")
             return
 
-    # 连续短消息
     if user_id not in user_short_msg_history:
         user_short_msg_history[user_id] = deque(maxlen=15)
     history = user_short_msg_history[user_id]
@@ -184,23 +181,22 @@ async def detect_short_or_filled_spam(message: Message):
     if len(recent) >= MIN_CONSECUTIVE_COUNT and all(len(t.strip()) <= SHORT_MSG_THRESHOLD for _, t in recent):
         await send_warning(message, user_id, "连续极短消息")
 
+# ==================== 统一发送警告（现在只显示举报按钮） ====================
 async def send_warning(message: Message, user_id: int, reason: str):
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="举报该用户", callback_data=f"report:{message.message_id}")],
-        [InlineKeyboardButton(text="禁言24小时", callback_data=f"ban24h:{message.message_id}")],
-        [InlineKeyboardButton(text="永久限制", callback_data=f"banperm:{message.message_id}")]
+        [InlineKeyboardButton(text="举报该用户", callback_data=f"report:{message.message_id}")]
     ])
     text = f"⚠️ 检测到疑似广告引流规避（{reason}）\n用户ID: {user_id}\n举报数: 0"
     await message.reply(text, reply_markup=keyboard)
 
-# ==================== 举报系统 ====================
+# ==================== 举报系统（举报后自动生成第二行两个按钮） ====================
 @router.callback_query(F.data.startswith("report:"))
 async def handle_report(callback: CallbackQuery):
     try:
         original_id = int(callback.data.split(":", 1)[1])
         reporter_id = callback.from_user.id
         async with lock:
-            if original_id not in reports: 
+            if original_id not in reports:
                 await callback.answer("已过期", show_alert=True); return
             data = reports[original_id]
             if reporter_id in data["reporters"]:
@@ -212,10 +208,11 @@ async def handle_report(callback: CallbackQuery):
             chat_id = data["chat_id"]
 
         keyboard_list = callback.message.reply_markup.inline_keyboard[:] if callback.message.reply_markup else []
+        # 如果还没有管理员按钮行，则添加第二行（两个按钮并排）
         if not any("ban" in str(btn.callback_data) for row in keyboard_list for btn in row):
-            keyboard_list.extend([
-                [InlineKeyboardButton(text="禁言24小时", callback_data=f"ban24h:{original_id}")],
-                [InlineKeyboardButton(text="永久限制", callback_data=f"banperm:{original_id}")]
+            keyboard_list.append([
+                InlineKeyboardButton(text="封禁24小时（👮‍♀️）", callback_data=f"ban24h:{original_id}"),
+                InlineKeyboardButton(text="永久封禁（👮‍♂️）", callback_data=f"banperm:{original_id}")
             ])
         new_keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_list)
 
@@ -243,7 +240,7 @@ async def handle_ban(callback: CallbackQuery):
             await callback.answer("仅管理员可操作", show_alert=True); return
 
         async with lock:
-            if original_id not in reports: 
+            if original_id not in reports:
                 await callback.answer("记录已过期", show_alert=True); return
             data = reports[original_id]
             suspect_id = data["suspect_id"]
@@ -251,8 +248,7 @@ async def handle_ban(callback: CallbackQuery):
 
         until_date = int(time.time()) + 86400 if action == "ban24h" else None
         await bot.restrict_chat_member(
-            chat_id=chat_id,
-            user_id=suspect_id,
+            chat_id=chat_id, user_id=suspect_id,
             permissions=ChatPermissions(can_send_messages=False, can_send_media_messages=False,
                                       can_send_polls=False, can_send_other_messages=False,
                                       can_add_web_page_previews=False, can_change_info=False,
@@ -311,7 +307,7 @@ async def cleanup_deleted_messages():
 
 # ==================== 启动 ====================
 async def main():
-    print("🚀 第五版完整版启动成功（私聊热更新 + 24h禁言）")
+    print("🚀 第六版按钮优化版启动成功（初始只显示举报按钮）")
     await load_data()
     await load_all()
     asyncio.create_task(cleanup_deleted_messages())
