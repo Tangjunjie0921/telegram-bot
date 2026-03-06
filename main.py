@@ -164,7 +164,7 @@ async def back_to_main(callback: CallbackQuery, state: FSMContext):
     except Exception as e:
         await callback.answer(f"返回失败：{str(e)}", show_alert=True)
 
-# 添加简介
+# ==================== 添加简介敏感词 ====================
 @router.callback_query(F.data.startswith("add_bio:"))
 async def start_add_bio_kw(callback: CallbackQuery, state: FSMContext):
     try:
@@ -211,7 +211,7 @@ async def confirm_add_bio(callback: CallbackQuery, state: FSMContext):
     except Exception as e:
         await callback.message.edit_text(f"添加失败：{str(e)}")
 
-# 删除简介
+# ==================== 删除简介敏感词 ====================
 @router.callback_query(F.data.startswith("del_bio:"))
 async def start_del_bio_kw(callback: CallbackQuery, state: FSMContext):
     try:
@@ -262,7 +262,7 @@ async def confirm_del_bio(callback: CallbackQuery, state: FSMContext):
     except Exception as e:
         await callback.message.edit_text(f"删除失败：{str(e)}")
 
-# 查看简介
+# ==================== 查看简介敏感词 ====================
 @router.callback_query(F.data.startswith("list_bio:"))
 async def list_bio_keywords(callback: CallbackQuery, state: FSMContext):
     try:
@@ -279,7 +279,7 @@ async def list_bio_keywords(callback: CallbackQuery, state: FSMContext):
     except Exception as e:
         await callback.message.edit_text(f"查看失败：{str(e)}")
 
-# 添加显示名
+# ==================== 添加显示名敏感词 ====================
 @router.callback_query(F.data.startswith("add_disp:"))
 async def start_add_disp_kw(callback: CallbackQuery, state: FSMContext):
     try:
@@ -324,7 +324,7 @@ async def confirm_add_disp(callback: CallbackQuery, state: FSMContext):
     except Exception as e:
         await callback.message.edit_text(f"添加失败：{str(e)}")
 
-# 删除显示名
+# ==================== 删除显示名敏感词 ====================
 @router.callback_query(F.data.startswith("del_disp:"))
 async def start_del_disp_kw(callback: CallbackQuery, state: FSMContext):
     try:
@@ -372,7 +372,7 @@ async def confirm_del_disp(callback: CallbackQuery, state: FSMContext):
     except Exception as e:
         await callback.message.edit_text(f"删除失败：{str(e)}")
 
-# 查看显示名
+# ==================== 查看显示名敏感词 ====================
 @router.callback_query(F.data.startswith("list_disp:"))
 async def list_disp_keywords(callback: CallbackQuery, state: FSMContext):
     try:
@@ -389,7 +389,7 @@ async def list_disp_keywords(callback: CallbackQuery, state: FSMContext):
     except Exception as e:
         await callback.message.edit_text(f"查看失败：{str(e)}")
 
-# ==================== 取消通用处理 ====================
+# ==================== 取消按钮通用处理 ====================
 @router.callback_query(F.data == "cancel")
 async def cancel_action(callback: CallbackQuery, state: FSMContext):
     try:
@@ -402,7 +402,18 @@ async def cancel_action(callback: CallbackQuery, state: FSMContext):
     except Exception as e:
         await callback.answer(f"取消失败：{str(e)}", show_alert=True)
 
-# ==================== 原有群内功能（完整保留） ====================
+@router.message(Command("cancel"), F.chat.type == "private", F.from_user.id.in_(ADMIN_IDS))
+async def cmd_cancel(message: Message, state: FSMContext):
+    try:
+        await state.clear()
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="管理群组设置", callback_data="select_group")
+        ]])
+        await message.reply("已取消当前操作，返回主菜单。", reply_markup=kb)
+    except Exception as e:
+        await message.reply(f"取消失败：{str(e)}")
+        
+        # ==================== 原有群内功能（完整保留，你之前跑通的部分） ====================
 SHORT_MSG_THRESHOLD = 3
 MIN_CONSECUTIVE_COUNT = 2
 TIME_WINDOW_SECONDS = 60
